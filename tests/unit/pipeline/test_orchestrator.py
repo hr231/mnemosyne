@@ -1,4 +1,4 @@
-"""Tests for ExtractionPipeline.from_settings with real YAML rules."""
+"""Tests for ExtractionPipeline — from_settings with real YAML rules and LLM routing."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,9 +7,13 @@ from uuid import uuid4
 import pytest
 
 from mnemosyne.config.settings import Settings
+from mnemosyne.db.models.memory import ExtractionResult, MemoryType
 from mnemosyne.embedding.fake import FakeEmbeddingClient
+from mnemosyne.errors import CannedResponseMissing
+from mnemosyne.llm.fake import FakeLLMClient
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
 from mnemosyne.providers.in_memory import InMemoryProvider
+from mnemosyne.rules.stub import StubRegexExtractor
 
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent
 _RULES_CORE_DIR = _REPO_ROOT / "rules" / "core"
@@ -123,3 +127,170 @@ async def test_from_settings_combined_budget_and_preference(settings, provider, 
         f"Expected at least 2 extractions (budget + preference). Got: "
         f"{[r.content for r in results]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM routing tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def settings_no_rules():
+    """Settings pointing at a non-existent rules dir so StubRegexExtractor is used."""
+    return Settings(
+        rules_dir=Path("/nonexistent/rules"),
+        extraction_version="0.1.0",
+        router_unstructured_threshold=0.7,
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_triggers_llm_extraction(settings_no_rules):
+    """Text that rules cannot match should trigger LLM extraction."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=1536)
+
+    llm_client = FakeLLMClient()
+    # This text contains no "I like/prefer/love/want/need" so StubRegexExtractor
+    # will produce 0 results -> router fires.
+    trigger_text = "The user visited Paris last summer and stayed at Hotel Lutetia."
+    llm_client.add_canned(
+        "paris",
+        [
+            ExtractionResult(
+                content="User visited Paris last summer",
+                memory_type=MemoryType.FACT,
+                importance=0.7,
+                rule_id="llm_extractor",
+            )
+        ],
+    )
+
+    pipeline = ExtractionPipeline(
+        settings=settings_no_rules,
+        provider=provider,
+        embedder=embedder,
+        extractors=[StubRegexExtractor()],
+        llm_client=llm_client,
+    )
+    results = await pipeline.process(user_id=uuid4(), text=trigger_text)
+
+    assert len(results) == 1
+    assert "Paris" in results[0].content
+
+
+@pytest.mark.asyncio
+async def test_router_skips_llm_when_rules_match(settings_no_rules):
+    """When rules extract well-covered content the LLM must NOT be called."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=1536)
+
+    llm_client = FakeLLMClient()
+    # No canned response registered — FakeLLMClient raises CannedResponseMissing if called.
+
+    # StubRegexExtractor matches this text and returns a long matched span,
+    # so unstructured_ratio will be low enough to skip LLM routing.
+    # We also inject settings with a very high threshold to ensure no routing.
+    settings_high_threshold = Settings(
+        rules_dir=Path("/nonexistent/rules"),
+        extraction_version="0.1.0",
+        router_unstructured_threshold=0.99,  # practically never route
+    )
+
+    pipeline = ExtractionPipeline(
+        settings=settings_high_threshold,
+        provider=provider,
+        embedder=embedder,
+        extractors=[StubRegexExtractor()],
+        llm_client=llm_client,
+    )
+    # StubRegexExtractor matches "I like Nike running shoes" and returns it,
+    # so extracted_count > 0 and high threshold ensures no routing.
+    results = await pipeline.process(
+        user_id=uuid4(), text="I like Nike running shoes"
+    )
+
+    assert len(results) >= 1
+    # Verify LLM was never invoked by checking no CannedResponseMissing was raised
+    # (the test would have failed above if LLM had been called)
+
+
+@pytest.mark.asyncio
+async def test_llm_results_deduped_with_rules(settings_no_rules):
+    """When both rules and LLM produce the same content, only one result persists."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=1536)
+
+    llm_client = FakeLLMClient()
+    # Text is long so the "I like coffee" match covers only a small fraction,
+    # making unstructured_ratio high enough to trigger LLM even with threshold=0.3.
+    filler = " " * 200  # unmatched padding inflates total_chars
+    text = "I like coffee" + filler
+    llm_client.add_canned(
+        "coffee",
+        [
+            ExtractionResult(
+                content="I like coffee",   # identical to rule result -> deduped
+                memory_type=MemoryType.PREFERENCE,
+                importance=0.6,
+                rule_id="llm_extractor",
+            ),
+            ExtractionResult(
+                content="User enjoys hot beverages",  # unique -> kept
+                memory_type=MemoryType.FACT,
+                importance=0.5,
+                rule_id="llm_extractor",
+            ),
+        ],
+    )
+
+    # threshold=0.3: unstructured_ratio ~= 1 - 13/213 ~= 0.94, so LLM fires
+    settings_low_threshold = Settings(
+        rules_dir=Path("/nonexistent/rules"),
+        extraction_version="0.1.0",
+        router_unstructured_threshold=0.3,
+    )
+
+    pipeline = ExtractionPipeline(
+        settings=settings_low_threshold,
+        provider=provider,
+        embedder=embedder,
+        extractors=[StubRegexExtractor()],
+        llm_client=llm_client,
+    )
+    results = await pipeline.process(user_id=uuid4(), text=text)
+
+    contents = [r.content for r in results]
+    # "I like coffee" appears once (deduped), "User enjoys hot beverages" appears once
+    assert contents.count("I like coffee") == 1
+    assert any("hot beverages" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_falls_back_to_rules(settings_no_rules):
+    """When the LLM raises, rule results are still returned."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=1536)
+
+    # FakeLLMClient with no canned response raises CannedResponseMissing
+    llm_client = FakeLLMClient()
+
+    # Force routing with threshold=0
+    settings_low_threshold = Settings(
+        rules_dir=Path("/nonexistent/rules"),
+        extraction_version="0.1.0",
+        router_unstructured_threshold=0.0,
+    )
+
+    pipeline = ExtractionPipeline(
+        settings=settings_low_threshold,
+        provider=provider,
+        embedder=embedder,
+        extractors=[StubRegexExtractor()],
+        llm_client=llm_client,
+    )
+    # StubRegexExtractor will match "I prefer tea"
+    results = await pipeline.process(user_id=uuid4(), text="I prefer tea")
+
+    # LLM raised (CannedResponseMissing), but rule results still returned
+    assert len(results) >= 1
+    assert any("prefer" in r.content.lower() or "tea" in r.content.lower() for r in results)

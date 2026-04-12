@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 
 from mnemosyne.config.settings import Settings
 from mnemosyne.db.models.memory import ExtractionResult, Memory
 from mnemosyne.embedding.base import EmbeddingClient
+from mnemosyne.llm.base import LLMClient
+from mnemosyne.pipeline.extraction.llm_extractor import LLMExtractor
+from mnemosyne.pipeline.extraction.router import ExtractionStats, should_route_to_llm
 from mnemosyne.providers.base import MemoryProvider
 from mnemosyne.rules.base_extractor import BaseExtractor
 from mnemosyne.rules.stub import StubRegexExtractor
@@ -13,17 +17,12 @@ from mnemosyne.rules.stub import StubRegexExtractor
 logger = logging.getLogger(__name__)
 
 
+def _content_key(content: str) -> str:
+    return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
+
+
 class ExtractionPipeline:
-    """Orchestrates the memory extraction pipeline for a single text input.
-
-    Stages:
-    1. Run all enabled ``BaseExtractor`` instances against *text*.
-    2. Routing decision (currently stubbed; LLM escalation path pending).
-    3. Embed each ``ExtractionResult``, construct a ``Memory``, persist
-       via ``provider.add``, and stamp the returned UUID on the result.
-
-    Per-extractor errors are isolated — one bad rule never aborts the pipeline.
-    """
+    """Orchestrates memory extraction: rules -> routing -> optional LLM -> persist."""
 
     def __init__(
         self,
@@ -31,6 +30,7 @@ class ExtractionPipeline:
         provider: MemoryProvider,
         embedder: EmbeddingClient,
         extractors: list[BaseExtractor] | None = None,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -38,6 +38,11 @@ class ExtractionPipeline:
         self._extractors: list[BaseExtractor] = extractors or [
             StubRegexExtractor(extraction_version=settings.extraction_version)
         ]
+        self._llm_extractor: LLMExtractor | None = None
+        if llm_client is not None:
+            self._llm_extractor = LLMExtractor(
+                llm_client, extraction_version=settings.extraction_version
+            )
 
     @classmethod
     def from_settings(
@@ -45,12 +50,9 @@ class ExtractionPipeline:
         settings: Settings,
         provider: MemoryProvider,
         embedder: EmbeddingClient,
+        llm_client: LLMClient | None = None,
     ) -> ExtractionPipeline:
-        """Factory method — loads rules from the configured rules directory.
-
-        Falls back to ``StubRegexExtractor`` when no rules are found (e.g.
-        the rules directory does not exist).
-        """
+        """Factory method — loads rules from the configured directory."""
         from mnemosyne.rules.rule_loader import RuleLoader
         from mnemosyne.rules.rule_registry import RuleRegistry
 
@@ -64,43 +66,58 @@ class ExtractionPipeline:
             registry.register_all(raw_extractors)
             extractors = registry.all()
 
-        return cls(settings=settings, provider=provider, embedder=embedder, extractors=extractors)
+        return cls(
+            settings=settings,
+            provider=provider,
+            embedder=embedder,
+            extractors=extractors,
+            llm_client=llm_client,
+        )
 
     async def process(
         self,
         user_id: uuid.UUID,
         text: str,
     ) -> list[ExtractionResult]:
-        """Extract memories from *text* for *user_id* and persist them.
-
-        Returns the list of ``ExtractionResult`` objects with
-        ``memory_id`` set to the UUID assigned by the provider.
-        """
+        """Extract memories from *text* and persist them."""
         # --- Stage 1: run rule extractors ---
-        all_results: list[ExtractionResult] = []
+        rule_results: list[ExtractionResult] = []
+        total_matched_chars = 0
         for extractor in self._extractors:
             if not extractor.enabled:
                 continue
             try:
                 results = extractor.extract(text)
-                all_results.extend(results)
-            except Exception as exc:  # noqa: BLE001 — per-rule isolation
+                rule_results.extend(results)
+                total_matched_chars += sum(r.matched_chars for r in results)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "extractor %r raised an exception — skipping",
-                    extractor.id,
-                    exc_info=exc,
+                    "extractor %r raised — skipping", extractor.id, exc_info=exc
                 )
 
         # --- Stage 2: routing decision ---
-        route_to_llm = False  # stub: LLM escalation not yet wired
-        if route_to_llm:
-            pass
+        all_results = list(rule_results)
+        stats = ExtractionStats(
+            extracted_count=len(rule_results),
+            total_chars=len(text),
+            chars_matched_by_rules=total_matched_chars,
+        )
+        if self._llm_extractor and should_route_to_llm(
+            stats, self._settings.router_unstructured_threshold
+        ):
+            try:
+                llm_results = await self._llm_extractor.extract(text)
+                seen_hashes = {_content_key(r.content) for r in rule_results}
+                for lr in llm_results:
+                    if _content_key(lr.content) not in seen_hashes:
+                        all_results.append(lr)
+                        seen_hashes.add(_content_key(lr.content))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM extraction failed — using rule results only", exc_info=exc)
 
-        # --- Stage 3: embed + persist each result ---
+        # --- Stage 3: embed + persist ---
         final_results: list[ExtractionResult] = []
         for result in all_results:
-            # Stamp extraction_version from settings so YAML rules (which do
-            # not set it themselves) always carry the correct pipeline version.
             result = result.model_copy(
                 update={"extraction_version": self._settings.extraction_version}
             )
