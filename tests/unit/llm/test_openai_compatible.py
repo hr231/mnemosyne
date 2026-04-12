@@ -52,7 +52,7 @@ async def test_parse_valid_json():
         {"content": "User is based in London", "memory_type": "fact", "importance": 0.6},
     ])
 
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post(payload)):
         results = await client.extract_memories("User prefers dark mode, based in London")
 
@@ -68,7 +68,7 @@ async def test_parse_markdown_fenced_json():
     payload_items = [{"content": "User likes jazz", "memory_type": "preference", "importance": 0.7}]
     fenced = f"```json\n{json.dumps(payload_items)}\n```"
 
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post(fenced)):
         results = await client.extract_memories("User likes jazz music")
 
@@ -78,7 +78,7 @@ async def test_parse_markdown_fenced_json():
 
 @pytest.mark.asyncio
 async def test_parse_invalid_json_raises():
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post("not json at all")):
         with pytest.raises(MalformedLLMResponse, match="Invalid JSON"):
             await client.extract_memories("some text")
@@ -88,7 +88,7 @@ async def test_parse_invalid_json_raises():
 async def test_parse_non_array_raises():
     payload = json.dumps({"key": "val"})
 
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post(payload)):
         with pytest.raises(MalformedLLMResponse, match="Expected JSON array"):
             await client.extract_memories("some text")
@@ -102,7 +102,7 @@ async def test_items_missing_content_are_skipped():
         {"content": "User owns a cat", "memory_type": "fact", "importance": 0.6},
     ])
 
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post(payload)):
         results = await client.extract_memories("User owns a cat")
 
@@ -115,7 +115,7 @@ async def test_default_memory_type_and_importance():
     """Items with missing optional fields use defaults (fact, 0.5)."""
     payload = json.dumps([{"content": "User drinks coffee"}])
 
-    client = OpenAICompatibleClient()
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model")
     with patch("httpx.AsyncClient", return_value=_mock_httpx_post(payload)):
         results = await client.extract_memories("User drinks coffee")
 
@@ -129,7 +129,7 @@ async def test_api_key_added_to_headers():
     payload = json.dumps([{"content": "test", "memory_type": "fact", "importance": 0.5}])
     mock_client_instance = _mock_httpx_post(payload)
 
-    client = OpenAICompatibleClient(api_key="sk-test-key")
+    client = OpenAICompatibleClient(base_url="http://localhost:11434/v1", model="test-model", api_key="sk-test-key")
     with patch("httpx.AsyncClient", return_value=mock_client_instance):
         await client.extract_memories("test")
 

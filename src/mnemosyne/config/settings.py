@@ -10,7 +10,7 @@ class Settings(BaseModel):
     llm_provider: str = "ollama"
     llm_model: str = "gemma3:4b"
     llm_base_url: str | None = "http://localhost:11434/v1"
-    embedding_dim: int = 1536
+    embedding_dim: int = 768
     rules_dir: Path = Path("rules/core")
     default_token_budget: int = 2000
     router_unstructured_threshold: float = 0.7

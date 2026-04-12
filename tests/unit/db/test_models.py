@@ -81,7 +81,7 @@ class TestMemoryAllFields:
         org_id = uuid.uuid4()
         session_id = uuid.uuid4()
         source_mem_id = uuid.uuid4()
-        embedding = [0.1] * 1536
+        embedding = [0.1] * 768
 
         mem = Memory(
             memory_id=memory_id,

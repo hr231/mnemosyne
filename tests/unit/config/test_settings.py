@@ -17,7 +17,7 @@ class TestSettingsDefaults:
         assert s.llm_provider == "ollama"
         assert s.llm_model == "gemma3:4b"
         assert s.llm_base_url == "http://localhost:11434/v1"
-        assert s.embedding_dim == 1536
+        assert s.embedding_dim == 768
         assert s.rules_dir == Path("rules/core")
         assert s.default_token_budget == 2000
         assert s.router_unstructured_threshold == 0.7
@@ -105,7 +105,7 @@ class TestSettingsFromEnv:
             assert s.llm_provider == "ollama"
             assert s.llm_model == "gemma3:4b"
             assert s.extraction_version == "0.1.0"
-            assert s.embedding_dim == 1536
+            assert s.embedding_dim == 768
             assert s.default_token_budget == 2000
         finally:
             # Restore

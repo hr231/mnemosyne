@@ -12,7 +12,7 @@ from mnemosyne.providers.in_memory import InMemoryProvider
 async def test_llm_extraction_with_ollama(real_llm_or_skip):
     settings = Settings.from_env()
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     llm_client = OpenAICompatibleClient(
         base_url="http://localhost:11434/v1",
         model="gemma4:26b",

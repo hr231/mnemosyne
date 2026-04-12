@@ -7,7 +7,6 @@ import pytest
 
 from mnemosyne.db.models.memory import Memory
 from mnemosyne.embedding.fake import FakeEmbeddingClient
-from mnemosyne.providers.in_memory import InMemoryProvider
 
 
 async def _make_memory(
@@ -19,16 +18,6 @@ async def _make_memory(
     """Helper: build a Memory with an embedding already set."""
     embedding = await embedder.embed(content)
     return Memory(user_id=user_id, content=content, embedding=embedding, **kwargs)
-
-
-@pytest.fixture
-def provider():
-    return InMemoryProvider()
-
-
-@pytest.fixture
-def embedder():
-    return FakeEmbeddingClient(dim=1536)
 
 
 class TestAccessCountBookkeeping:

@@ -31,7 +31,7 @@ def provider():
 
 @pytest.fixture
 def embedder():
-    return FakeEmbeddingClient(dim=1536)
+    return FakeEmbeddingClient(dim=768)
 
 
 @pytest.mark.asyncio
@@ -147,7 +147,7 @@ def settings_no_rules():
 async def test_router_triggers_llm_extraction(settings_no_rules):
     """Text that rules cannot match should trigger LLM extraction."""
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
 
     llm_client = FakeLLMClient()
     # This text contains no "I like/prefer/love/want/need" so StubRegexExtractor
@@ -182,7 +182,7 @@ async def test_router_triggers_llm_extraction(settings_no_rules):
 async def test_router_skips_llm_when_rules_match(settings_no_rules):
     """When rules extract well-covered content the LLM must NOT be called."""
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
 
     llm_client = FakeLLMClient()
     # No canned response registered — FakeLLMClient raises CannedResponseMissing if called.
@@ -218,7 +218,7 @@ async def test_router_skips_llm_when_rules_match(settings_no_rules):
 async def test_llm_results_deduped_with_rules(settings_no_rules):
     """When both rules and LLM produce the same content, only one result persists."""
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
 
     llm_client = FakeLLMClient()
     # Text is long so the "I like coffee" match covers only a small fraction,
@@ -269,7 +269,7 @@ async def test_llm_results_deduped_with_rules(settings_no_rules):
 async def test_llm_failure_falls_back_to_rules(settings_no_rules):
     """When the LLM raises, rule results are still returned."""
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
 
     # FakeLLMClient with no canned response raises CannedResponseMissing
     llm_client = FakeLLMClient()

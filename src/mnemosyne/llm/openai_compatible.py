@@ -27,8 +27,8 @@ class OpenAICompatibleClient(LLMClient):
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434/v1",
-        model: str = "gemma3:4b",
+        base_url: str,
+        model: str,
         api_key: str | None = None,
         timeout: float = 30.0,
     ):

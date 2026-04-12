@@ -12,7 +12,7 @@ from mnemosyne.config.settings import Settings
 async def test_walking_skeleton_end_to_end():
     settings = Settings.from_env()  # reads MNEMOSYNE_* or defaults
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     pipeline = ExtractionPipeline.from_settings(settings, provider, embedder)
 
     user_id = uuid4()
@@ -86,7 +86,7 @@ async def test_token_budget_is_configurable_not_hardcoded():
     """Assert shape, not value: the budget works for any reasonable number."""
     settings = Settings.from_env()
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     # seed a few memories
     pipeline = ExtractionPipeline.from_settings(settings, provider, embedder)
     user_id = uuid4()

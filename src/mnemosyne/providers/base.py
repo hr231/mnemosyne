@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 
+from mnemosyne.db.models.history import MemoryHistoryEntry
 from mnemosyne.db.models.memory import Memory, ScoredMemory
 from mnemosyne.retrieval.scoring import ScoringWeights
 
@@ -78,4 +79,9 @@ class MemoryProvider(ABC):
         (``memory_id``, ``content_hash``, ``extraction_version``) are
         included in *fields*.
         """
+        ...
+
+    @abstractmethod
+    async def get_history(self, memory_id: uuid.UUID) -> list[MemoryHistoryEntry]:
+        """Return the mutation history for a memory, newest first."""
         ...

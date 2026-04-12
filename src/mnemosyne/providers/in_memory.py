@@ -5,6 +5,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 
+from mnemosyne.db.models.history import MemoryHistoryEntry
 from mnemosyne.db.models.memory import Memory, ScoredMemory
 from mnemosyne.errors import MemoryNotFound
 from mnemosyne.providers.base import MemoryProvider
@@ -49,6 +50,7 @@ class InMemoryProvider(MemoryProvider):
 
     def __init__(self) -> None:
         self._memories: dict[uuid.UUID, Memory] = {}
+        self._history: list[MemoryHistoryEntry] = []
 
     # ------------------------------------------------------------------
     # MemoryProvider interface
@@ -79,6 +81,13 @@ class InMemoryProvider(MemoryProvider):
         # Stamp the canonical content_hash onto the memory
         memory = memory.model_copy(update={"content_hash": ch})
         self._memories[memory.memory_id] = memory
+        self._history.append(MemoryHistoryEntry(
+            memory_id=memory.memory_id,
+            operation="create",
+            new_content=memory.content,
+            new_importance=memory.importance,
+            actor="agent_tool",
+        ))
         return memory.memory_id
 
     async def get_by_id(self, memory_id: uuid.UUID) -> Memory | None:
@@ -168,6 +177,13 @@ class InMemoryProvider(MemoryProvider):
             raise MemoryNotFound(memory_id)
         mem.valid_until = datetime.now(timezone.utc)
         mem.metadata["invalidation_reason"] = reason
+        self._history.append(MemoryHistoryEntry(
+            memory_id=memory_id,
+            operation="invalidate",
+            old_content=mem.content,
+            actor="agent_tool",
+            actor_details={"reason": reason},
+        ))
 
     async def update(self, memory_id: uuid.UUID, **fields) -> Memory:
         """Update mutable fields on *memory_id* and return the updated memory.
@@ -183,7 +199,24 @@ class InMemoryProvider(MemoryProvider):
         if bad:
             raise ValueError(f"Cannot update read-only fields: {bad}")
 
+        old_content = mem.content
+        old_importance = mem.importance
         for k, v in fields.items():
             setattr(mem, k, v)
         mem.updated_at = datetime.now(timezone.utc)
+        self._history.append(MemoryHistoryEntry(
+            memory_id=memory_id,
+            operation="update",
+            old_content=old_content,
+            new_content=mem.content,
+            old_importance=old_importance,
+            new_importance=mem.importance,
+            actor="agent_tool",
+        ))
         return mem
+
+    async def get_history(self, memory_id: uuid.UUID) -> list[MemoryHistoryEntry]:
+        """Return mutation history for *memory_id*, newest first."""
+        entries = [h for h in self._history if h.memory_id == memory_id]
+        entries.sort(key=lambda h: h.occurred_at, reverse=True)
+        return entries

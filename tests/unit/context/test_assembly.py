@@ -34,7 +34,7 @@ async def _add_memory(
 @pytest.mark.asyncio
 async def test_assembles_within_budget() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_id = uuid.uuid4()
 
     for i in range(5):
@@ -54,7 +54,7 @@ async def test_assembles_within_budget() -> None:
 @pytest.mark.asyncio
 async def test_sections_populated() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_id = uuid.uuid4()
 
     await _add_memory(provider, embedder, user_id, "User prefers dark mode", importance=0.8)
@@ -75,7 +75,7 @@ async def test_sections_populated() -> None:
 @pytest.mark.asyncio
 async def test_profile_section_has_high_importance() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_id = uuid.uuid4()
 
     high_imp_content = "User is a professional chef"
@@ -101,7 +101,7 @@ async def test_profile_section_has_high_importance() -> None:
 @pytest.mark.asyncio
 async def test_small_budget_truncates() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_id = uuid.uuid4()
 
     # Add memories with long content that will exceed a tiny budget
@@ -126,7 +126,7 @@ async def test_small_budget_truncates() -> None:
 @pytest.mark.asyncio
 async def test_empty_provider() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_id = uuid.uuid4()
 
     query_vec = await embedder.embed("anything")
@@ -144,7 +144,7 @@ async def test_empty_provider() -> None:
 @pytest.mark.asyncio
 async def test_different_users_isolated() -> None:
     provider = InMemoryProvider()
-    embedder = FakeEmbeddingClient(dim=1536)
+    embedder = FakeEmbeddingClient(dim=768)
     user_a = uuid.uuid4()
     user_b = uuid.uuid4()
 

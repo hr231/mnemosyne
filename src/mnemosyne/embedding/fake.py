@@ -15,7 +15,7 @@ class FakeEmbeddingClient(EmbeddingClient):
     output so that cosine similarity equals the dot product.
     """
 
-    def __init__(self, dim: int = 1536) -> None:
+    def __init__(self, dim: int = 768) -> None:
         self.dim = dim
 
     async def embed(self, text: str) -> list[float]:
