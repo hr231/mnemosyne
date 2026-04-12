@@ -1,0 +1,14 @@
+
+.claude/
+.worktrees/
+docs/execute_design_docs/
+.DS_Store
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+.eggs/
+.pytest_cache/
+.venv/
+venv/
+.env
