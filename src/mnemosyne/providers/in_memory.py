@@ -32,7 +32,7 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
 class InMemoryProvider(MemoryProvider):
     """In-process memory provider for development and testing.
 
-    Implements all invariants of the Honest InMemoryProvider spec:
+    Implements all provider invariants:
 
     - Content-hash dedup: same (user_id, content_hash) with valid_until IS
       NULL is a no-op; the existing memory_id is returned.
@@ -45,12 +45,6 @@ class InMemoryProvider(MemoryProvider):
       memories actually returned to the caller.
     - Deterministic tie-breaking: (-score, -created_at timestamp, memory_id)
       so tests that produce equal scores are stable.
-
-    Day 1 morning scorer: naive cosine pass only.
-    score_breakdown = {"relevance": cosine, "recency": 0, "importance": 0,
-                       "frequency": 0}
-    Track B replaces the scorer body on Day 1 afternoon; the signature is
-    unchanged.
     """
 
     def __init__(self) -> None:
@@ -103,7 +97,7 @@ class InMemoryProvider(MemoryProvider):
         Scoring order:
         1. Collect candidates (bi-temporal filter applied unless
            include_invalidated=True).
-        2. Score each candidate with cosine similarity (Day 1 naive pass).
+        2. Score each candidate (currently naive cosine; multi-signal pending).
         3. Sort by (-score, -created_at, memory_id) for determinism.
         4. Slice to limit.
         5. Bump access_count / last_accessed on the returned slice ONLY.
@@ -125,7 +119,7 @@ class InMemoryProvider(MemoryProvider):
         if not candidates:
             return []
 
-        # Score — Day 1 morning: cosine only; other signals stub at 0
+        # Score — cosine only for now; other signals zeroed
         scored: list[ScoredMemory] = []
         for m in candidates:
             cosine = _cosine_sim(query_embedding, m.embedding)  # type: ignore[arg-type]

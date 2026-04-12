@@ -13,3 +13,4 @@ dist/
 venv/
 .env
 docs/
+__pycache__/

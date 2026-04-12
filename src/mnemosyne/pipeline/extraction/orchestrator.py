@@ -16,24 +16,13 @@ logger = logging.getLogger(__name__)
 class ExtractionPipeline:
     """Orchestrates the memory extraction pipeline for a single text input.
 
-    Day 1 morning shape (v0.1.0 walking skeleton):
-    -----------------------------------------------
+    Stages:
     1. Run all enabled ``BaseExtractor`` instances against *text*.
-    2. Router stub: ``route_to_llm = False`` — LLM path wired in Day 2
-       (Task 8 creates ``router.py`` and replaces the inline stub).
-    3. For each ``ExtractionResult``, embed the content, construct a
-       ``Memory``, call ``provider.add``, and stamp the returned UUID
-       on the result.
+    2. Routing decision (currently stubbed; LLM escalation path pending).
+    3. Embed each ``ExtractionResult``, construct a ``Memory``, persist
+       via ``provider.add``, and stamp the returned UUID on the result.
 
-    The ``extractors`` list defaults to a single ``StubRegexExtractor``
-    seeded with ``settings.extraction_version``.  Day 1 afternoon replaces
-    the default with ``RuleRegistry.load(settings.rules_dir).all()`` —
-    one line changes in ``from_settings``; the rest of this class is
-    untouched.
-
-    Per-extractor errors are swallowed and logged so one bad rule never
-    aborts the pipeline.  This mirrors the production rule isolation
-    contract described in Section 2.3.1 of the design doc.
+    Per-extractor errors are isolated — one bad rule never aborts the pipeline.
     """
 
     def __init__(
@@ -57,8 +46,25 @@ class ExtractionPipeline:
         provider: MemoryProvider,
         embedder: EmbeddingClient,
     ) -> ExtractionPipeline:
-        """Factory method.  Day 1 afternoon upgrades the extractor list here."""
-        return cls(settings=settings, provider=provider, embedder=embedder)
+        """Factory method — loads rules from the configured rules directory.
+
+        Falls back to ``StubRegexExtractor`` when no rules are found (e.g.
+        the rules directory does not exist).
+        """
+        from mnemosyne.rules.rule_loader import RuleLoader
+        from mnemosyne.rules.rule_registry import RuleRegistry
+
+        loader = RuleLoader()
+        raw_extractors = loader.load_from_directory(settings.rules_dir)
+
+        if not raw_extractors:
+            extractors = [StubRegexExtractor(extraction_version=settings.extraction_version)]
+        else:
+            registry = RuleRegistry()
+            registry.register_all(raw_extractors)
+            extractors = registry.all()
+
+        return cls(settings=settings, provider=provider, embedder=embedder, extractors=extractors)
 
     async def process(
         self,
@@ -85,15 +91,19 @@ class ExtractionPipeline:
                     exc_info=exc,
                 )
 
-        # --- Stage 2: routing decision (stub: always False for Day 1) ---
-        # Task 8 (Day 2 morning) creates router.py and replaces this line.
-        route_to_llm = False  # stub: route_to_llm = False
+        # --- Stage 2: routing decision ---
+        route_to_llm = False  # stub: LLM escalation not yet wired
         if route_to_llm:
-            pass  # LLM extraction path — Day 2
+            pass
 
         # --- Stage 3: embed + persist each result ---
         final_results: list[ExtractionResult] = []
         for result in all_results:
+            # Stamp extraction_version from settings so YAML rules (which do
+            # not set it themselves) always carry the correct pipeline version.
+            result = result.model_copy(
+                update={"extraction_version": self._settings.extraction_version}
+            )
             embedding = await self._embedder.embed(result.content)
             memory = Memory(
                 user_id=user_id,

@@ -7,20 +7,11 @@ from mnemosyne.rules.base_extractor import BaseExtractor
 
 
 class StubRegexExtractor(BaseExtractor):
-    """Walking-skeleton regex extractor used in v0.1.0.
+    """Fallback regex extractor matching simple preference expressions.
 
-    Matches simple preference expressions ("I like/prefer/love/want/need …")
-    up to the first sentence boundary.  Replaced by the full YAML rule
-    registry (``RuleRegistry.load()``) in Day 1 afternoon — the orchestrator
-    swaps the extractor list without touching this class.
-
-    ``extraction_version`` is read from the constructor argument, which
-    the orchestrator sets from ``settings.extraction_version``.  No
-    version strings are hardcoded here.
-
-    Provenance stamped on every result:
-    - ``rule_id="walking_skeleton_stub"``
-    - ``extraction_version`` from constructor
+    Matches "I like/prefer/love/want/need ..." up to the first sentence
+    boundary. Used when no YAML rules are found in the configured rules
+    directory.
     """
 
     id = "walking_skeleton_stub"

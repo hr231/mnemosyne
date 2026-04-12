@@ -1,0 +1,13 @@
+responses:
+  - fragment: "shoes felt off"
+    results:
+      - content: "User prefers comfortable shoe fit"
+        memory_type: "preference"
+        importance: 0.7
+        rule_id: "llm_extractor"
+  - fragment: "pinched in the middle"
+    results:
+      - content: "User experienced discomfort with narrow shoes"
+        memory_type: "fact"
+        importance: 0.6
+        rule_id: "llm_extractor"

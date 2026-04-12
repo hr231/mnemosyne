@@ -8,7 +8,7 @@ from mnemosyne.db.models.memory import ExtractionResult
 class LLMClient(ABC):
     @abstractmethod
     async def complete(self, prompt: str, **kwargs) -> str:
-        """Raw completion. Used by reflection generation in Sprint 2."""
+        """Raw text completion."""
         ...
 
     @abstractmethod

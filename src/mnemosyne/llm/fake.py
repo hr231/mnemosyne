@@ -15,9 +15,7 @@ class FakeLLMClient(LLMClient):
     Raises ``CannedResponseMissing`` on a cache miss so tests fail loudly
     rather than silently returning empty results.
 
-    Note: ``complete`` always returns ``"fake completion"``; it is only
-    used by reflection generation (Sprint 2) and does not need canned
-    responses in the walking skeleton.
+    ``complete`` always returns ``"fake completion"``.
     """
 
     def __init__(self) -> None:

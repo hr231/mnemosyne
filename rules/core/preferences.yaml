@@ -1,0 +1,38 @@
+rules:
+  - id: preference_positive
+    name: "Positive preference"
+    description: "User explicitly states a liking (prefer/like/love/enjoy)"
+    category: preference
+    type: regex
+    pattern: '\bi\s+(?:really\s+)?(?:prefer|like|love|enjoy)\s+(.+?)(?:[.\n,;!]|$)'
+    template: "Prefers: ${1}"
+    importance: 0.7
+    version: 1
+
+  - id: preference_favorite
+    name: "Favorite or go-to mention"
+    category: preference
+    type: regex
+    pattern: '\bmy\s+(?:favorite|preferred|go-to)\s+(?:\w+\s+)?(?:is|are)\s+(.+?)(?:[.\n,;!]|$)'
+    template: "Favorite: ${1}"
+    importance: 0.8
+    version: 1
+
+  - id: preference_negative
+    name: "Negative preference"
+    description: "User states they dislike/hate something"
+    category: preference
+    type: regex
+    pattern: "\\bi\\s+(?:really\\s+)?(?:don'?t\\s+(?:like|want)|hate|dislike|can'?t\\s+stand|avoid)\\s+(.+?)(?:[.\\n,;!]|$)"
+    template: "Dislikes: ${1}"
+    importance: 0.7
+    version: 1
+
+  - id: preference_not_fan
+    name: "Not a fan / not interested"
+    category: preference
+    type: regex
+    pattern: '\bnot\s+(?:a fan of|interested in)\s+(.+?)(?:[.\n,;!]|$)'
+    template: "Dislikes: ${1}"
+    importance: 0.7
+    version: 1

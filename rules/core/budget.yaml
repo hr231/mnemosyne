@@ -1,0 +1,31 @@
+rules:
+  - id: budget_explicit
+    name: "Explicit budget mention"
+    description: "Detects patterns like 'my budget is $200' or 'budget of 500'"
+    category: fact
+    type: regex
+    pattern: '(?:budget|spend|spending|price range)\s*(?:is|of|around|about|under|up to)?\s*\$?\s*(\d[\d,]*)'
+    template: "Budget: $${1}"
+    importance: 0.8
+    version: 1
+    owner: "core-team"
+
+  - id: budget_under_amount
+    name: "Under a given amount"
+    description: "Detects 'under $150', 'less than $100', etc."
+    category: fact
+    type: regex
+    pattern: '(?:under|below|less than|no more than|up to)\s*\$\s*(\d[\d,]*)'
+    template: "Budget: under $${1}"
+    importance: 0.8
+    version: 1
+
+  - id: budget_spend_intent
+    name: "Spend intent"
+    description: "Detects 'looking to spend around $500', 'willing to pay $200'"
+    category: fact
+    type: regex
+    pattern: '(?:looking to spend|willing to pay|can afford)\s*(?:around|about|up to)?\s*\$?\s*(\d[\d,]*)'
+    template: "Budget: around $${1}"
+    importance: 0.8
+    version: 1
