@@ -77,7 +77,7 @@ class TestLoadFromDirectory:
         assert extractors == []
 
     def test_python_files_are_ignored(self, tmp_path):
-        """Sprint 1 — Python plugin loading is deferred to Sprint 2."""
+        """Python files in the rules directory are not loaded."""
         (tmp_path / "plugin.py").write_text("# not loaded yet")
         (tmp_path / "rule.yaml").write_text(_VALID_REGEX_RULE.format(rule_id="yaml_rule"))
 
