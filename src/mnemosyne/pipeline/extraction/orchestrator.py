@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 
@@ -13,12 +12,9 @@ from mnemosyne.pipeline.extraction.router import ExtractionStats, should_route_t
 from mnemosyne.providers.base import MemoryProvider
 from mnemosyne.rules.base_extractor import BaseExtractor
 from mnemosyne.rules.stub import StubRegexExtractor
+from mnemosyne.utils import content_hash
 
 logger = logging.getLogger(__name__)
-
-
-def _content_key(content: str) -> str:
-    return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
 
 
 class ExtractionPipeline:
@@ -107,11 +103,11 @@ class ExtractionPipeline:
         ):
             try:
                 llm_results = await self._llm_extractor.extract(text)
-                seen_hashes = {_content_key(r.content) for r in rule_results}
+                seen_hashes = {content_hash(r.content) for r in rule_results}
                 for lr in llm_results:
-                    if _content_key(lr.content) not in seen_hashes:
+                    if content_hash(lr.content) not in seen_hashes:
                         all_results.append(lr)
-                        seen_hashes.add(_content_key(lr.content))
+                        seen_hashes.add(content_hash(lr.content))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("LLM extraction failed — using rule results only", exc_info=exc)
 

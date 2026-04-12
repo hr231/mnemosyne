@@ -91,6 +91,88 @@ class TestPreferenceRules:
 
 
 # ---------------------------------------------------------------------------
+# Size rules
+# ---------------------------------------------------------------------------
+
+
+class TestSizeRules:
+    def test_wear_size_number(self, registry):
+        results = registry.extract("I wear size 10")
+        assert any("10" in r.content for r in results), (
+            f"Expected '10' in some result content, got: {[r.content for r in results]}"
+        )
+
+    def test_wear_size_letter(self, registry):
+        results = registry.extract("I wear size M")
+        assert any("M" in r.content for r in results), (
+            f"Expected 'M' in some result content, got: {[r.content for r in results]}"
+        )
+
+    def test_my_size_is(self, registry):
+        results = registry.extract("my size is M")
+        assert any("M" in r.content for r in results), (
+            f"Expected 'M' in some result content, got: {[r.content for r in results]}"
+        )
+
+    def test_size_type_is_fact(self, registry):
+        results = registry.extract("I wear size 10")
+        size_results = [r for r in results if "10" in r.content]
+        assert all(r.memory_type == MemoryType.FACT for r in size_results)
+
+    def test_size_importance_is_high(self, registry):
+        results = registry.extract("I wear size M")
+        size_results = [r for r in results if "M" in r.content]
+        assert all(r.importance >= 0.8 for r in size_results)
+
+
+# ---------------------------------------------------------------------------
+# Keyword trigger rules
+# ---------------------------------------------------------------------------
+
+
+class TestKeywordTriggerRules:
+    def test_allergic_to_latex(self, registry):
+        results = registry.extract("I'm allergic to latex")
+        assert len(results) >= 1, f"Expected at least 1 result, got: {results}"
+        allergic_results = [r for r in results if "allergic" in r.content.lower()]
+        assert len(allergic_results) >= 1
+
+    def test_allergic_importance_is_very_high(self, registry):
+        results = registry.extract("I'm allergic to nuts")
+        allergic_results = [r for r in results if "allergic" in r.content.lower()]
+        assert all(r.importance >= 0.9 for r in allergic_results)
+
+    def test_remember_keyword(self, registry):
+        results = registry.extract("Please remember I take the train to work")
+        assert any("remember" in r.content.lower() for r in results), (
+            f"Expected 'remember' keyword result, got: {[r.content for r in results]}"
+        )
+
+    def test_always_keyword_is_procedural(self, registry):
+        results = registry.extract("I always check reviews before buying")
+        always_results = [r for r in results if "always" in r.content.lower()]
+        assert len(always_results) >= 1
+        assert all(r.memory_type == MemoryType.PROCEDURAL for r in always_results)
+
+    def test_never_keyword_is_procedural(self, registry):
+        results = registry.extract("I never buy without reading the reviews first")
+        never_results = [r for r in results if "never" in r.content.lower()]
+        assert len(never_results) >= 1
+        assert all(r.memory_type == MemoryType.PROCEDURAL for r in never_results)
+
+    def test_important_keyword(self, registry):
+        results = registry.extract("It's important that you remember my dietary needs")
+        assert any("important" in r.content.lower() for r in results), (
+            f"Expected 'important' keyword result, got: {[r.content for r in results]}"
+        )
+
+    def test_important_importance_high(self, registry):
+        results = registry.extract("This is important: I am vegan")
+        important_results = [r for r in results if "important" in r.content.lower()]
+        assert all(r.importance >= 0.8 for r in important_results)
+
+
+# ---------------------------------------------------------------------------
 # No extraction cases
 # ---------------------------------------------------------------------------
 

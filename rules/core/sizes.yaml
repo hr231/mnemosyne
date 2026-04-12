@@ -1,0 +1,22 @@
+rules:
+  - id: size_explicit
+    name: "Explicit size statement"
+    description: "Detects patterns like 'my size is M' or 'size XL'"
+    category: fact
+    type: regex
+    pattern: '(?:my\s+)?size\s+(?:is\s+)?(\w+)'
+    template: "Size: ${1}"
+    importance: 0.9
+    version: 1
+    owner: "core-team"
+
+  - id: size_wear
+    name: "User wears size"
+    description: "Detects patterns like 'I wear size 10' or 'I am a size M'"
+    category: fact
+    type: regex
+    pattern: "i\\s+(?:wear|am a|'m a)\\s+(?:size\\s+)?(\\w+)"
+    template: "Size: ${1}"
+    importance: 0.9
+    version: 1
+    owner: "core-team"

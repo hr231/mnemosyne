@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import math
 import uuid
 from datetime import datetime, timezone
 
@@ -9,25 +7,11 @@ from mnemosyne.db.models.history import MemoryHistoryEntry
 from mnemosyne.db.models.memory import Memory, ScoredMemory
 from mnemosyne.errors import MemoryNotFound
 from mnemosyne.providers.base import MemoryProvider
-from mnemosyne.retrieval.scoring import ScoringWeights
+from mnemosyne.retrieval.scoring import MultiSignalScorer, ScoringWeights
+from mnemosyne.utils import content_hash
 
 # Fields that must never be overwritten via update()
 READ_ONLY_FIELDS = frozenset({"memory_id", "content_hash", "extraction_version"})
-
-
-def _content_hash(content: str) -> str:
-    """Canonical sha256 hash of normalised content (strip + lower)."""
-    return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
-
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two equal-length vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 class InMemoryProvider(MemoryProvider):
@@ -67,7 +51,7 @@ class InMemoryProvider(MemoryProvider):
         if memory.embedding is None:
             raise ValueError("caller must set embedding before add")
 
-        ch = _content_hash(memory.content)
+        ch = content_hash(memory.content)
 
         # Dedup: same (user_id, content_hash) that is still active
         for existing in self._memories.values():
@@ -106,7 +90,8 @@ class InMemoryProvider(MemoryProvider):
         Scoring order:
         1. Collect candidates (bi-temporal filter applied unless
            include_invalidated=True).
-        2. Score each candidate (currently naive cosine; multi-signal pending).
+        2. Score each candidate with MultiSignalScorer (relevance, recency,
+           importance, frequency).
         3. Sort by (-score, -created_at, memory_id) for determinism.
         4. Slice to limit.
         5. Bump access_count / last_accessed on the returned slice ONLY.
@@ -128,22 +113,12 @@ class InMemoryProvider(MemoryProvider):
         if not candidates:
             return []
 
-        # Score — cosine only for now; other signals zeroed
+        # Score — multi-signal: relevance, recency, importance, frequency
+        scorer = MultiSignalScorer(weights or ScoringWeights())
         scored: list[ScoredMemory] = []
         for m in candidates:
-            cosine = _cosine_sim(query_embedding, m.embedding)  # type: ignore[arg-type]
-            scored.append(
-                ScoredMemory(
-                    memory=m,
-                    score=cosine,
-                    score_breakdown={
-                        "relevance": cosine,
-                        "recency": 0.0,
-                        "importance": 0.0,
-                        "frequency": 0.0,
-                    },
-                )
-            )
+            total, breakdown = scorer.score(m, query_embedding, now)
+            scored.append(ScoredMemory(memory=m, score=total, score_breakdown=breakdown))
 
         # Deterministic sort: highest score first; among ties newest first,
         # then ascending memory_id for final stability.

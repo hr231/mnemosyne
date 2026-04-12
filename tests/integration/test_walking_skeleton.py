@@ -65,18 +65,22 @@ async def test_walking_skeleton_end_to_end():
     )
     assert tool_result["status"] == "saved"
     latex_vec = await embedder.embed("latex allergy")
-    latex_hits = await provider.search(latex_vec, user_id=user_id, limit=3)
+    # Use a large limit so all stored memories are returned — with multi-signal
+    # scoring the latex memory may not rank in the top-3 because the fake
+    # embedder produces near-random cosine values while already-accessed Nike
+    # memories have a frequency boost.
+    latex_hits = await provider.search(latex_vec, user_id=user_id, limit=10)
     assert any("latex" in h.memory.content.lower() for h in latex_hits)
 
     # 8. Bi-temporal invalidate: invalidated memories don't appear in default search
     latex_mem_id = next(h.memory.memory_id for h in latex_hits if "latex" in h.memory.content.lower())
     await provider.invalidate(latex_mem_id, reason="user retracted")
-    latex_hits_after = await provider.search(latex_vec, user_id=user_id, limit=3)
+    latex_hits_after = await provider.search(latex_vec, user_id=user_id, limit=10)
     assert not any(h.memory.memory_id == latex_mem_id for h in latex_hits_after)
 
     # 9. But historical query sees it
     latex_hits_historical = await provider.search(
-        latex_vec, user_id=user_id, limit=3, include_invalidated=True
+        latex_vec, user_id=user_id, limit=10, include_invalidated=True
     )
     assert any(h.memory.memory_id == latex_mem_id for h in latex_hits_historical)
 

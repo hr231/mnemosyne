@@ -1,0 +1,50 @@
+rules:
+  - id: trigger_allergic
+    name: "Allergy or health info"
+    description: "Detects allergy-related statements for high-importance memory capture"
+    category: fact
+    type: keyword_context
+    keywords: ["allergic", "allergy", "intolerant"]
+    importance: 0.95
+    version: 1
+    owner: "core-team"
+
+  - id: trigger_remember
+    name: "Explicit remember request"
+    description: "Detects when the user explicitly asks the agent to remember something"
+    category: fact
+    type: keyword_context
+    keywords: ["remember", "don't forget"]
+    importance: 0.9
+    version: 1
+    owner: "core-team"
+
+  - id: trigger_always
+    name: "Always pattern"
+    description: "Detects standing preferences or recurring behaviours"
+    category: procedural
+    type: keyword_context
+    keywords: ["always", "every time"]
+    importance: 0.8
+    version: 1
+    owner: "core-team"
+
+  - id: trigger_never
+    name: "Never pattern"
+    description: "Detects explicit exclusions or hard constraints"
+    category: procedural
+    type: keyword_context
+    keywords: ["never"]
+    importance: 0.8
+    version: 1
+    owner: "core-team"
+
+  - id: trigger_important
+    name: "User marks as important"
+    description: "Detects when the user signals that information is important"
+    category: fact
+    type: keyword_context
+    keywords: ["important"]
+    importance: 0.85
+    version: 1
+    owner: "core-team"

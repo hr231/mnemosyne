@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,28 +11,14 @@ from mnemosyne.db.models.history import MemoryHistoryEntry
 from mnemosyne.db.models.memory import Memory, MemoryType, ScoredMemory
 from mnemosyne.errors import MemoryNotFound
 from mnemosyne.providers.base import MemoryProvider
-from mnemosyne.retrieval.scoring import ScoringWeights
+from mnemosyne.retrieval.scoring import MultiSignalScorer, ScoringWeights
+from mnemosyne.utils import content_hash
 
 # Fields that must never be overwritten via update()
 _READ_ONLY_FIELDS = frozenset({"memory_id", "content_hash", "extraction_version"})
 
 # Multiplier for HNSW over-fetch before Python-side re-rank
 _OVERFETCH_FACTOR = 5
-
-
-def _content_hash(content: str) -> str:
-    """Canonical sha256 hash of normalised content (strip + lower)."""
-    return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
-
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two equal-length vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _row_to_memory(row: asyncpg.Record) -> Memory:
@@ -152,25 +136,13 @@ class PostgresMemoryProvider(MemoryProvider):
         if memory.embedding is None:
             raise ValueError("caller must set embedding before add")
 
-        ch = _content_hash(memory.content)
+        mem_id = memory.memory_id
+        ch = content_hash(memory.content)
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                # Exact-hash dedup check
-                existing = await conn.fetchval(
-                    """
-                    SELECT memory_id FROM memory.memories
-                    WHERE user_id = $1 AND content_hash = $2 AND valid_until IS NULL
-                    LIMIT 1
-                    """,
-                    memory.user_id,
-                    ch,
-                )
-                if existing is not None:
-                    return uuid.UUID(str(existing))
-
-                mem_id = memory.memory_id
-                await conn.execute(
+                # Atomic dedup: attempt insert, let the DB handle the conflict
+                result = await conn.fetchval(
                     """
                     INSERT INTO memory.memories (
                         memory_id, user_id, agent_id, org_id,
@@ -191,6 +163,9 @@ class PostgresMemoryProvider(MemoryProvider):
                         $19, $20::uuid[],
                         $21::jsonb, $22, $23
                     )
+                    ON CONFLICT (user_id, content_hash) WHERE valid_until IS NULL
+                    DO NOTHING
+                    RETURNING memory_id
                     """,
                     mem_id,
                     memory.user_id,
@@ -217,6 +192,19 @@ class PostgresMemoryProvider(MemoryProvider):
                     memory.updated_at,
                 )
 
+                if result is None:
+                    # Conflict — row already exists; return its id
+                    existing = await conn.fetchval(
+                        """
+                        SELECT memory_id FROM memory.memories
+                        WHERE user_id = $1 AND content_hash = $2 AND valid_until IS NULL
+                        """,
+                        memory.user_id,
+                        ch,
+                    )
+                    return uuid.UUID(str(existing))
+
+                # New row inserted — write history
                 await conn.execute(
                     """
                     INSERT INTO memory.memory_history (
@@ -269,8 +257,8 @@ class PostgresMemoryProvider(MemoryProvider):
 
         Stage 1: HNSW pre-filter — fetch up to ``limit * _OVERFETCH_FACTOR``
         candidates ordered by cosine distance.
-        Stage 2: Python-side re-rank — naive cosine scoring (same as
-        ``InMemoryProvider`` for now; MultiSignalScorer wiring is Track B).
+        Stage 2: Python-side re-rank — MultiSignalScorer (relevance, recency,
+        importance, frequency).
         Stage 3: Slice to *limit*, bump access_count / last_accessed.
 
         Side-effects: increments ``access_count`` and sets ``last_accessed``
@@ -309,24 +297,15 @@ class PostgresMemoryProvider(MemoryProvider):
 
         candidates: list[Memory] = [_row_to_memory(r) for r in rows]
 
-        # Score — naive cosine for now; other signals zeroed
+        # Score — multi-signal: relevance, recency, importance, frequency
+        now = datetime.now(timezone.utc)
+        scorer = MultiSignalScorer(weights or ScoringWeights())
         scored: list[ScoredMemory] = []
         for mem in candidates:
             if mem.embedding is None:
                 continue
-            cosine = _cosine_sim(query_embedding, mem.embedding)
-            scored.append(
-                ScoredMemory(
-                    memory=mem,
-                    score=cosine,
-                    score_breakdown={
-                        "relevance": cosine,
-                        "recency": 0.0,
-                        "importance": 0.0,
-                        "frequency": 0.0,
-                    },
-                )
-            )
+            total, breakdown = scorer.score(mem, query_embedding, now)
+            scored.append(ScoredMemory(memory=mem, score=total, score_breakdown=breakdown))
 
         # Deterministic sort: highest score first; ties broken by newest then
         # ascending memory_id for stability.

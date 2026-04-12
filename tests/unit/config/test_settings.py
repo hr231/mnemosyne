@@ -130,3 +130,81 @@ class TestSettingsFromEnv:
         s = Settings.from_env()
 
         assert s.router_unstructured_threshold == pytest.approx(0.85)
+
+    def test_from_env_embedding_provider(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_PROVIDER", "openai_compatible")
+        s = Settings.from_env()
+        assert s.embedding_provider == "openai_compatible"
+
+    def test_from_env_embedding_model(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_MODEL", "text-embedding-3-small")
+        s = Settings.from_env()
+        assert s.embedding_model == "text-embedding-3-small"
+
+    def test_from_env_embedding_base_url(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_BASE_URL", "https://api.openai.com")
+        s = Settings.from_env()
+        assert s.embedding_base_url == "https://api.openai.com"
+
+    def test_from_env_embedding_api_key(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_API_KEY", "sk-test-123")
+        s = Settings.from_env()
+        assert s.embedding_api_key == "sk-test-123"
+
+    def test_from_env_llm_api_key(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_LLM_API_KEY", "sk-llm-key")
+        s = Settings.from_env()
+        assert s.llm_api_key == "sk-llm-key"
+
+
+class TestConfigProperties:
+    def test_llm_config_defaults(self):
+        s = Settings()
+        cfg = s.llm_config
+        assert cfg["provider"] == "ollama"
+        assert cfg["model"] == "gemma3:4b"
+        assert cfg["base_url"] == "http://localhost:11434/v1"
+        assert cfg["api_key"] is None
+
+    def test_llm_config_reflects_fields(self):
+        s = Settings(llm_provider="openai_compatible", llm_model="gpt-4o", llm_api_key="sk-x")
+        cfg = s.llm_config
+        assert cfg["provider"] == "openai_compatible"
+        assert cfg["model"] == "gpt-4o"
+        assert cfg["api_key"] == "sk-x"
+
+    def test_embedding_config_defaults(self):
+        s = Settings()
+        cfg = s.embedding_config
+        assert cfg["provider"] == "ollama"
+        assert cfg["model"] == "nomic-embed-text"
+        assert cfg["base_url"] == "http://localhost:11434"
+        assert cfg["api_key"] is None
+        assert cfg["dimensions"] == 768
+
+    def test_embedding_config_reflects_fields(self):
+        s = Settings(
+            embedding_provider="openai_compatible",
+            embedding_model="text-embedding-3-small",
+            embedding_base_url="https://api.openai.com",
+            embedding_api_key="sk-emb",
+            embedding_dim=1536,
+        )
+        cfg = s.embedding_config
+        assert cfg["provider"] == "openai_compatible"
+        assert cfg["model"] == "text-embedding-3-small"
+        assert cfg["base_url"] == "https://api.openai.com"
+        assert cfg["api_key"] == "sk-emb"
+        assert cfg["dimensions"] == 1536
+
+    def test_embedding_config_from_env(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_PROVIDER", "openai_compatible")
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_BASE_URL", "https://api.together.xyz")
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_MODEL", "togethercomputer/m2-bert")
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_API_KEY", "tog-key")
+        s = Settings.from_env()
+        cfg = s.embedding_config
+        assert cfg["provider"] == "openai_compatible"
+        assert cfg["base_url"] == "https://api.together.xyz"
+        assert cfg["model"] == "togethercomputer/m2-bert"
+        assert cfg["api_key"] == "tog-key"
