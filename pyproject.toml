@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemosyne"
-version = "0.1.0"
+version = "0.3.0"
 description = "General-purpose agent memory module with hybrid extraction and multi-signal retrieval"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,16 +16,20 @@ dependencies = [
     "asyncpg>=0.29",
     "pgvector>=0.3",
     "alembic>=1.13",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "asyncpg>=0.29",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "python-dotenv>=1.0",
 ]
+ner = ["spacy>=3.7", "gliner>=0.2"]
+nli = ["transformers>=4.40", "sentencepiece"]
+fastembed = ["fastembed>=0.3"]
+all = ["mnemosyne[ner,nli,fastembed]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

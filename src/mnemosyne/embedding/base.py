@@ -44,4 +44,10 @@ class EmbeddingClient(ABC):
                 dimensions=config.get("dimensions"),
             )
 
+        if provider == "fastembed":
+            from mnemosyne.embedding.fastembed import FastEmbedClient
+            return FastEmbedClient(
+                model_name=config.get("model", "BAAI/bge-small-en-v1.5"),
+            )
+
         raise ValueError(f"Unknown embedding provider: {provider!r}")

@@ -1,6 +1,6 @@
 # Mnemosyne
 
-Persistent memory for AI agents. Drop it into your agent server and your agent remembers users across sessions — preferences, facts, past decisions, context. Mnemosyne extracts memories from conversations (rule-based + LLM), stores them with bi-temporal versioning, and retrieves them via multi-signal scored search (relevance, recency, importance, frequency). It runs as an embedded Python module, not a separate service. Swap between in-memory (dev) and PostgreSQL (production) without changing your code.
+Persistent memory for AI agents. Drop it into your agent server and your agent remembers users across sessions — preferences, facts, past decisions, context. Mnemosyne extracts memories from conversations (rule-based + LLM), automatically identifies entities (people, brands, products, locations), stores everything with bi-temporal versioning, and retrieves it via multi-signal scored search (relevance, recency, importance, frequency). It generates high-level insights through reflection when memories accumulate, and resolves contradictions when new information conflicts with existing memories. It runs as an embedded Python module, not a separate service. Swap between in-memory (dev) and PostgreSQL (production) without changing your code.
 
 ## Install
 
@@ -306,3 +306,24 @@ Three rule types are supported:
 | `keyword_context` | Fires on keyword match, extracts the containing sentence | `keywords` |
 
 You can also write Python extractors by subclassing `BaseExtractor` and placing the `.py` file in the rules directory. See `src/mnemosyne/rules/base_extractor.py` for the interface.
+
+## Entity Extraction
+
+Mnemosyne extracts entities (people, brands, products, locations) from conversations using spaCy + GLiNER + LLM fallback. Entities are resolved, deduplicated, and linked to memories. Entity-aware search finds memories by entity relationship, not just vector similarity.
+
+```bash
+pip install "mnemosyne[ner]"
+python -m spacy download en_core_web_sm
+```
+
+## Reflection & Contradiction
+
+**Reflection:** When enough memories accumulate (importance sum >= 150), Mnemosyne generates high-level insights stored as first-class searchable memories.
+
+**Contradiction:** When new information conflicts with existing memories, Mnemosyne detects the conflict (via NLI model or cosine similarity) and resolves it: supersede, keep both, merge, or keep old. Old memories are invalidated, never deleted.
+
+```bash
+# Optional: local NLI for fast contradiction detection
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install "mnemosyne[nli]"
+```
