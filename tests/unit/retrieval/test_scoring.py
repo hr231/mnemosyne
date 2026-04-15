@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from mnemosyne.db.models.memory import Memory
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.retrieval.scoring import MultiSignalScorer, ScoringWeights
 
 

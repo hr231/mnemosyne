@@ -42,7 +42,7 @@ def real_llm_or_skip():
 # Parameterized provider fixture — runs provider tests against both backends
 # ---------------------------------------------------------------------------
 
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.providers.in_memory import InMemoryProvider
 
 

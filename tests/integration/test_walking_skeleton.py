@@ -2,7 +2,7 @@ import os
 import pytest
 from uuid import uuid4
 from mnemosyne.providers.in_memory import InMemoryProvider
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
 from mnemosyne.context.assembly import assemble_context
 from mnemosyne.integration.save_memory_tool import save_memory_tool_spec, handle_save_memory

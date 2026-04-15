@@ -5,8 +5,8 @@ import uuid
 import pytest
 
 from mnemosyne.db.models.memory import Memory, MemoryType
-from mnemosyne.embedding.fake import FakeEmbeddingClient
-from mnemosyne.llm.fake import FakeLLMClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
+from tests.fixtures.fake_llm import FakeLLMClient
 from mnemosyne.providers.in_memory import InMemoryProvider
 from mnemosyne.pipeline.contradiction import (
     ContradictionAction,

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from mnemosyne.db.models.memory import Memory
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.episodes import create_episode
 from mnemosyne.providers.in_memory import InMemoryProvider
 

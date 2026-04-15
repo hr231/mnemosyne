@@ -7,7 +7,7 @@ import pytest
 
 from mnemosyne.context.assembly import assemble_context
 from mnemosyne.db.models.memory import Memory, MemoryType
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.providers.in_memory import InMemoryProvider
 
 

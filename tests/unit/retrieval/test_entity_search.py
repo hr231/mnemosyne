@@ -9,7 +9,7 @@ import pytest
 from mnemosyne.context.assembly import ContextBlock, assemble_context
 from mnemosyne.db.models.entity import Entity, EntityMention
 from mnemosyne.db.models.memory import Memory, ScoredMemory
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.providers.in_memory import InMemoryProvider
 from mnemosyne.providers.in_memory_entity_store import InMemoryEntityStore
 from mnemosyne.retrieval.entity_search import (

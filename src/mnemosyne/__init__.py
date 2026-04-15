@@ -4,7 +4,6 @@ from mnemosyne.config.settings import Settings
 from mnemosyne.context.assembly import ContextBlock, assemble_context
 from mnemosyne.db.models.memory import ExtractionResult, Memory, ScoredMemory
 from mnemosyne.embedding.base import EmbeddingClient
-from mnemosyne.embedding.fake import FakeEmbeddingClient
 from mnemosyne.integration.prompt_builder import build_system_prompt_memory_block
 from mnemosyne.integration.save_memory_tool import handle_save_memory, save_memory_tool_spec
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
@@ -19,7 +18,6 @@ __all__ = [
     "EmbeddingClient",
     "ExtractionPipeline",
     "ExtractionResult",
-    "FakeEmbeddingClient",
     "handle_save_memory",
     "InMemoryProvider",
     "Memory",

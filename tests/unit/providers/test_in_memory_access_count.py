@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from mnemosyne.db.models.memory import Memory
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 
 
 async def _make_memory(

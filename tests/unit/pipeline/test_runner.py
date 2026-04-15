@@ -8,7 +8,7 @@ import pytest
 
 from mnemosyne.config.settings import Settings
 from mnemosyne.db.models.memory import ExtractionResult, MemoryType
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.runner import SessionProcessingResult, process_session
 from mnemosyne.providers.in_memory import InMemoryProvider
 from mnemosyne.rules.stub import StubRegexExtractor

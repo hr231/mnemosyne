@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from mnemosyne.db.models.entity import Entity, EntityMention
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.ner.resolver import resolve_entities
 from mnemosyne.pipeline.ner.spacy_extractor import RawEntity
 from mnemosyne.providers.in_memory_entity_store import InMemoryEntityStore

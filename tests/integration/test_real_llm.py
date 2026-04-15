@@ -2,7 +2,7 @@ import pytest
 from uuid import uuid4
 
 from mnemosyne.config.settings import Settings
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.llm.openai_compatible import OpenAICompatibleClient
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
 from mnemosyne.providers.in_memory import InMemoryProvider

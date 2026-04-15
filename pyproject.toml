@@ -26,10 +26,13 @@ dev = [
     "pytest-cov>=5.0",
     "python-dotenv>=1.0",
 ]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.30"]
+google = ["google-genai>=1.0"]
+fastembed = ["fastembed>=0.3"]
 ner = ["spacy>=3.7", "gliner>=0.2"]
 nli = ["transformers>=4.40", "sentencepiece"]
-fastembed = ["fastembed>=0.3"]
-all = ["mnemosyne[ner,nli,fastembed]"]
+all = ["mnemosyne[openai,anthropic,google,fastembed,ner,nli]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from mnemosyne.db.models.memory import Memory
-from mnemosyne.embedding.fake import FakeEmbeddingClient
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.embedding import embed_memory_ids, embed_pending_memories
 from mnemosyne.providers.in_memory import InMemoryProvider
 

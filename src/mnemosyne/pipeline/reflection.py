@@ -32,9 +32,7 @@ async def should_generate_reflection(
     since: datetime | None = None,
 ) -> bool:
     """Check if enough importance has accumulated to trigger reflection."""
-    from mnemosyne.embedding.fake import FakeEmbeddingClient
-    dummy_embedder = FakeEmbeddingClient(dim=768)
-    dummy_vec = await dummy_embedder.embed("reflection trigger check")
+    dummy_vec = [0.0] * 768  # dummy vector for trigger check scan
 
     hits = await provider.search(dummy_vec, user_id=user_id, limit=200)
 
