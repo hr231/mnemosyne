@@ -46,10 +46,13 @@ class TestPredictNLI:
         )
 
     def test_predict_neutral(self):
-        """Unrelated sentences score high on neutral (neither entailment nor contradiction)."""
+        """Logically independent sentences score high on neutral (neither entailment nor contradiction)."""
         from mnemosyne.pipeline.nli import predict_nli
 
-        result = predict_nli("The sky is blue", "Pizza is delicious")
+        # Same-domain premise/hypothesis where neither entails nor contradicts the other.
+        # MNLI-style neutral pairs (shared subject, independent facts) are what this model
+        # was trained on; far-domain unrelated pairs get pushed into contradiction.
+        result = predict_nli("The cat is on the mat", "The cat likes tuna")
         assert result.neutral > 0.5, (
-            f"Expected neutral > 0.5 for unrelated pair, got {result.neutral}"
+            f"Expected neutral > 0.5 for logically independent pair, got {result.neutral}"
         )
