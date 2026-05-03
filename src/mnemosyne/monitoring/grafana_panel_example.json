@@ -1,0 +1,25 @@
+{
+  "title": "Mnemosyne Retrieval p95 latency",
+  "type": "timeseries",
+  "datasource": { "type": "prometheus", "uid": "prometheus" },
+  "targets": [
+    {
+      "expr": "mnemosyne_retrieval_latency_p95_ms",
+      "legendFormat": "p95 ms",
+      "refId": "A"
+    }
+  ],
+  "fieldConfig": {
+    "defaults": {
+      "unit": "ms",
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          { "color": "green", "value": null },
+          { "color": "orange", "value": 300 },
+          { "color": "red", "value": 500 }
+        ]
+      }
+    }
+  }
+}

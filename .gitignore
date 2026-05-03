@@ -16,3 +16,4 @@ docs/
 __pycache__/
 CHANGELOG.md
 TODOS.md
+tests/

@@ -20,6 +20,8 @@ class EntityStore(Protocol):
     async def add_mention(self, mention: EntityMention) -> None: ...
     async def find_mentions_for_entity(self, entity_id: uuid.UUID) -> list[uuid.UUID]: ...
     async def find_entities_for_memory(self, memory_id: uuid.UUID) -> list[Entity]: ...
+    async def list_for_user(self, user_id: uuid.UUID) -> list[Entity]: ...
+    async def physical_delete_user(self, user_id: uuid.UUID) -> int: ...
 
 
 class PostgresEntityStore:
@@ -144,6 +146,45 @@ class PostgresEntityStore:
                 memory_id,
             )
         return [_row_to_entity(r) for r in rows]
+
+    async def list_for_user(self, user_id: uuid.UUID) -> list[Entity]:
+        """Return every entity owned by *user_id*, newest first."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM memory.entities
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                """,
+                user_id,
+            )
+        return [_row_to_entity(r) for r in rows]
+
+    async def physical_delete_user(self, user_id: uuid.UUID) -> int:
+        """Delete every entity + mention for *user_id*. Returns entities deleted."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    DELETE FROM memory.entity_mentions
+                    WHERE entity_id IN (
+                        SELECT entity_id FROM memory.entities WHERE user_id = $1
+                    )
+                    """,
+                    user_id,
+                )
+                deleted = await conn.fetchval(
+                    """
+                    WITH removed AS (
+                        DELETE FROM memory.entities
+                        WHERE user_id = $1
+                        RETURNING entity_id
+                    )
+                    SELECT COUNT(*) FROM removed
+                    """,
+                    user_id,
+                )
+        return int(deleted or 0)
 
 
 def _row_to_entity(row: asyncpg.Record) -> Entity:

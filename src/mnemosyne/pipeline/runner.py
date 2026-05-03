@@ -15,8 +15,11 @@ from mnemosyne.pipeline.decay import apply_decay
 from mnemosyne.pipeline.embedding import embed_pending_memories
 from mnemosyne.pipeline.episodes import create_episode
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
+from mnemosyne.pipeline.extraction.reextraction_driver import ReextractionDriver
+from mnemosyne.pipeline.reflection import maybe_run_reflection
 from mnemosyne.providers.base import MemoryProvider
 from mnemosyne.rules.base_extractor import BaseExtractor
+from mnemosyne.rules.stub import StubRegexExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -250,3 +253,110 @@ async def process_pending(
             )
 
     return results
+
+
+@dataclass
+class PipelineStats:
+    """Aggregate counters for a single ``PipelineRunner.run_once`` invocation."""
+
+    reextraction_processed: int = 0
+    reextraction_changed: int = 0
+    reextraction_kept: int = 0
+    reextraction_superseded: int = 0
+    reextraction_new: int = 0
+    reflections_created: int = 0
+
+
+class PipelineRunner:
+    """Opt-in periodic runner for background pipeline work.
+
+    The runner is a thin orchestration layer on top of ``process_session``
+    and ``ReextractionDriver``. A single tick processes re-extraction for a
+    given list of users when ``reextraction_target_version`` is configured.
+    """
+
+    def __init__(
+        self,
+        provider: MemoryProvider,
+        embedder: EmbeddingClient,
+        llm_client: LLMClient | None = None,
+        settings: Settings | None = None,
+        extractors: list[BaseExtractor] | None = None,
+        reextraction_target_version: str | None = None,
+    ) -> None:
+        self._provider = provider
+        self._embedder = embedder
+        self._llm_client = llm_client
+        self._settings = settings
+        self._reextraction_target = reextraction_target_version
+
+        self._reextraction_driver: ReextractionDriver | None = None
+        if reextraction_target_version:
+            if settings is None:
+                raise ValueError(
+                    "settings required when reextraction_target_version is set"
+                )
+            extractor_list = extractors or [
+                StubRegexExtractor(extraction_version=settings.extraction_version)
+            ]
+            pipeline = ExtractionPipeline(
+                settings=settings,
+                provider=provider,
+                embedder=embedder,
+                extractors=extractor_list,
+                llm_client=llm_client,
+            )
+            pg_pool = getattr(provider, "_pool", None)
+            self._reextraction_driver = ReextractionDriver(
+                provider=provider,
+                pipeline=pipeline,
+                embedder=embedder,
+                pg_pool=pg_pool,
+            )
+
+    async def run_once(
+        self, user_ids: list[uuid.UUID] | None = None
+    ) -> PipelineStats:
+        """Execute one runner tick.
+
+        When ``user_ids`` is provided and a re-extraction target is set, the
+        runner drives ``ReextractionDriver.reextract_user`` for each user and
+        accumulates the totals onto ``PipelineStats``.
+
+        For every user in ``user_ids`` the runner also calls
+        :func:`maybe_run_reflection` which fires only when the importance-sum
+        threshold has been crossed. Reflection is skipped when no
+        ``llm_client`` is configured (it is LLM-driven).
+        """
+        stats = PipelineStats()
+        if not user_ids:
+            return stats
+
+        # Re-extraction stage (opt-in, only when a target version is set).
+        if self._reextraction_driver is not None:
+            assert self._reextraction_target is not None
+            for uid in user_ids:
+                r = await self._reextraction_driver.reextract_user(
+                    user_id=uid, target_version=self._reextraction_target
+                )
+                stats.reextraction_processed += r.count_processed
+                stats.reextraction_changed += r.count_changed
+                stats.reextraction_kept += r.count_kept
+                stats.reextraction_superseded += r.count_superseded
+                stats.reextraction_new += r.count_new
+
+        # Reflection stage — requires an LLM client.
+        if self._llm_client is not None:
+            for uid in user_ids:
+                try:
+                    stats.reflections_created += await maybe_run_reflection(
+                        provider=self._provider,
+                        llm=self._llm_client,
+                        embedder=self._embedder,
+                        user_id=uid,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "reflection stage failed for user %s: %s", uid, exc
+                    )
+        return stats

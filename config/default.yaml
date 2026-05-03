@@ -1,0 +1,8 @@
+monitoring:
+  enabled: true
+  port: 9090
+
+startup:
+  fail_fast: true
+  required_env_vars:
+    - MNEMOSYNE_PG_DSN

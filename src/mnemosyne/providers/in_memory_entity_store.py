@@ -86,3 +86,18 @@ class InMemoryEntityStore:
     async def find_entities_for_memory(self, memory_id: uuid.UUID) -> list[Entity]:
         entity_ids = {m.entity_id for m in self._mentions if m.memory_id == memory_id}
         return [self._entities[eid] for eid in entity_ids if eid in self._entities]
+
+    async def list_for_user(self, user_id: uuid.UUID) -> list[Entity]:
+        """Return every entity owned by *user_id*, newest first."""
+        out = [e for e in self._entities.values() if e.user_id == user_id]
+        out.sort(key=lambda e: e.created_at, reverse=True)
+        return out
+
+    async def physical_delete_user(self, user_id: uuid.UUID) -> int:
+        """Delete every entity + mention for *user_id*. Returns entities deleted."""
+        to_delete = [eid for eid, e in self._entities.items() if e.user_id == user_id]
+        deleted_set = set(to_delete)
+        for eid in to_delete:
+            del self._entities[eid]
+        self._mentions = [m for m in self._mentions if m.entity_id not in deleted_set]
+        return len(to_delete)

@@ -32,7 +32,13 @@ google = ["google-genai>=1.0"]
 fastembed = ["fastembed>=0.3"]
 ner = ["spacy>=3.7", "gliner>=0.2"]
 nli = ["transformers>=4.40", "sentencepiece"]
-all = ["mnemosyne[openai,anthropic,google,fastembed,ner,nli]"]
+monitoring = ["prometheus_client>=0.19"]
+all = ["mnemosyne[openai,anthropic,google,fastembed,ner,nli,monitoring]"]
+bench = [
+    "datasets>=2.16",
+    "sacrebleu>=2.4",
+    "rich>=13.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

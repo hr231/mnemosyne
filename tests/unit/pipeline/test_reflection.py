@@ -138,3 +138,82 @@ class TestGenerateReflections:
 
         result = await generate_reflections(provider, user_id, NoopLLM(), embedder)
         assert result == []
+
+
+class TestMaybeRunReflection:
+    async def test_fires_when_threshold_crossed(self, provider, embedder):
+        from mnemosyne.pipeline.reflection import maybe_run_reflection
+
+        class InsightLLM(FakeLLMClient):
+            async def complete(self, prompt, **kwargs):
+                return json.dumps(["User values comfort", "User prefers running"])
+
+        user_id = uuid.uuid4()
+        # 20 memories * 0.8 importance = 160 scaled sum >= 150 threshold
+        await _seed_memories(provider, embedder, user_id, count=20, importance=0.8)
+
+        count = await maybe_run_reflection(provider, InsightLLM(), embedder, user_id)
+        assert count == 2
+
+        persisted_reflections = [
+            m
+            for m in provider._memories.values()
+            if m.user_id == user_id and m.memory_type == MemoryType.REFLECTION
+        ]
+        assert len(persisted_reflections) == 2
+        for r in persisted_reflections:
+            assert r.metadata.get("reflection_depth") == 1
+            assert r.source_memory_ids
+
+    async def test_skips_below_threshold(self, provider, embedder):
+        from mnemosyne.pipeline.reflection import maybe_run_reflection
+
+        class TrackingLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def complete(self, prompt, **kwargs):
+                self.calls += 1
+                return "[]"
+
+        user_id = uuid.uuid4()
+        # 3 memories * 0.1 importance = 3 scaled sum << 150
+        await _seed_memories(provider, embedder, user_id, count=3, importance=0.1)
+
+        llm = TrackingLLM()
+        count = await maybe_run_reflection(provider, llm, embedder, user_id)
+        assert count == 0
+        assert llm.calls == 0, "LLM must NOT be called when the trigger does not fire"
+
+    async def test_depth_cap_blocks_trigger(self, provider, embedder):
+        from mnemosyne.pipeline.reflection import maybe_run_reflection
+
+        class TrackingLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def complete(self, prompt, **kwargs):
+                self.calls += 1
+                return json.dumps(["ignored"])
+
+        user_id = uuid.uuid4()
+        # Seed 20 depth-2 reflections at importance 0.9 — total importance
+        # is very high but depth-2 memories are excluded from the sum.
+        for i in range(20):
+            emb = await embedder.embed(f"deep {i}")
+            mem = Memory(
+                user_id=user_id,
+                content=f"deep reflection {i}",
+                memory_type=MemoryType.REFLECTION,
+                importance=0.9,
+                embedding=emb,
+                metadata={"reflection_depth": MAX_REFLECTION_DEPTH},
+            )
+            await provider.add(mem)
+
+        llm = TrackingLLM()
+        count = await maybe_run_reflection(provider, llm, embedder, user_id)
+        assert count == 0
+        assert llm.calls == 0, "depth-2 memories must not contribute to the trigger"

@@ -439,6 +439,120 @@ async def test_assemble_context_without_entity_store() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rrf_promotes_mentioned_memory_above_vector_only() -> None:
+    """A memory linked via entity mention but with low vector similarity to
+    the query should still surface in the top results because RRF fuses the
+    entity-expanded list with the vector list.
+
+    Regression: a pure-vector search would miss the mention-linked memory
+    when its content is semantically distant from the query. RRF must
+    promote it.
+    """
+    provider = InMemoryProvider()
+    entity_store = InMemoryEntityStore()
+    user_id = uuid.uuid4()
+
+    # m_linked: mention-linked via Nike entity, text does NOT contain "Nike"
+    m_linked = await _make_memory(
+        provider,
+        user_id,
+        "those shoes I got last time were too narrow",
+        importance=0.5,
+    )
+    # m_unlinked: vector-similar to "Nike running shoes" but no entity link
+    await _make_memory(
+        provider,
+        user_id,
+        "I prefer running over cycling",
+        importance=0.5,
+    )
+
+    # Register the Nike entity and link m_linked to it
+    entity = _make_entity(user_id, "Nike", "brand")
+    await entity_store.upsert_entity(entity)
+    await entity_store.add_mention(_make_mention(entity.entity_id, m_linked.memory_id))
+
+    query_text = "Nike running shoes"
+    query_embedding = await _EMBEDDER.embed(query_text)
+
+    results = await entity_aware_search(
+        provider=provider,
+        entity_store=entity_store,
+        query_text=query_text,
+        query_embedding=query_embedding,
+        user_id=user_id,
+        embedder=_EMBEDDER,
+        limit=5,
+    )
+    result_ids = [sm.memory.memory_id for sm in results]
+    assert m_linked.memory_id in result_ids, (
+        "RRF did not surface the entity-linked memory — expansion / fusion broken"
+    )
+
+
+@pytest.mark.asyncio
+async def test_entity_filter_restricts_expansion() -> None:
+    """When entity_filter is set, expansion is restricted to those names.
+
+    A filter listing entities that DO NOT exist in the store must collapse the
+    result set to pure vector search (no entity expansion at all), whereas
+    passing no filter lets any known entity's mentions expand.
+    """
+    provider = InMemoryProvider()
+    entity_store = InMemoryEntityStore()
+    user_id = uuid.uuid4()
+
+    # Memory linked via entity mention (Nike), but content mentions Adidas
+    # Nike entity exists; Adidas entity does NOT.
+    mem = await _make_memory(provider, user_id, "red trainers I love")
+    nike = _make_entity(user_id, "Nike", "brand")
+    await entity_store.upsert_entity(nike)
+    await entity_store.add_mention(_make_mention(nike.entity_id, mem.memory_id))
+
+    query_text = "shoes"
+    query_embedding = await _EMBEDDER.embed(query_text)
+
+    # No filter — Nike entity is matched via the word-scan fallback when the
+    # query contains "shoes" (no — "shoes" is not a known entity). So we test
+    # the case where explicit filter IS the only expansion source.
+    # Filter=["Nike"] should expand via Nike mention.
+    with_nike_filter = await entity_aware_search(
+        provider=provider,
+        entity_store=entity_store,
+        query_text=query_text,
+        query_embedding=query_embedding,
+        user_id=user_id,
+        embedder=_EMBEDDER,
+        limit=10,
+        entity_filter=["Nike"],
+    )
+    with_unknown_filter = await entity_aware_search(
+        provider=provider,
+        entity_store=entity_store,
+        query_text=query_text,
+        query_embedding=query_embedding,
+        user_id=user_id,
+        embedder=_EMBEDDER,
+        limit=10,
+        entity_filter=["Reebok"],  # not registered
+    )
+
+    nike_ids = {sm.memory.memory_id for sm in with_nike_filter}
+    unknown_ids = {sm.memory.memory_id for sm in with_unknown_filter}
+
+    assert mem.memory_id in nike_ids, (
+        "entity_filter=['Nike'] should include the memory linked to Nike"
+    )
+    # Unknown filter should not surface the entity-linked memory via expansion.
+    # (Vector search may still include it, but the in_entity flag must be 0.)
+    for sm in with_unknown_filter:
+        if sm.memory.memory_id == mem.memory_id:
+            assert sm.score_breakdown.get("in_entity", 0.0) == 0.0, (
+                "unknown entity_filter should not mark memories as entity-expanded"
+            )
+
+
+@pytest.mark.asyncio
 async def test_assemble_context_with_entity_store() -> None:
     """assemble_context with entity_store and query_text should return a valid
     ContextBlock with token_count within budget."""

@@ -24,7 +24,16 @@ class MemoryProvider(ABC):
 
     There is intentionally no ``delete()`` method.  The bi-temporal model
     retires memories via ``invalidate()`` only, preserving the audit trail.
+
+    Capabilities
+    ------------
+    ``cascades_entities``: True when ``physical_delete_user`` also removes
+    entities + entity_mentions owned by the user in the same transaction.
+    Callers that compose a provider with a separate EntityStore should skip
+    the entity store's own ``physical_delete_user`` when this is True.
     """
+
+    cascades_entities: bool = False
 
     @abstractmethod
     async def add(self, memory: Memory) -> uuid.UUID:
@@ -84,4 +93,41 @@ class MemoryProvider(ABC):
     @abstractmethod
     async def get_history(self, memory_id: uuid.UUID) -> list[MemoryHistoryEntry]:
         """Return the mutation history for a memory, newest first."""
+        ...
+
+    @abstractmethod
+    async def select_by_extraction_version_below(
+        self, user_id: uuid.UUID, target_version: str
+    ) -> list[Memory]:
+        """Return all memories for ``user_id`` whose ``extraction_version``
+        is strictly less than ``target_version`` (semver tuple order).
+
+        Memories with a ``NULL`` or malformed extraction_version are skipped.
+        Invalidated memories (``valid_until`` set) are excluded.
+        """
+        ...
+
+    @abstractmethod
+    async def list_for_user(
+        self, user_id: uuid.UUID, include_invalidated: bool = False
+    ) -> list[Memory]:
+        """Return every memory owned by ``user_id`` ordered by created_at DESC.
+
+        Unlike ``search``, no scoring or query embedding is applied.
+        Defaults to excluding rows where ``valid_until`` is set.
+        """
+        ...
+
+    @abstractmethod
+    async def physical_delete_user(
+        self, user_id: uuid.UUID, requestor: str, dry_run: bool = False
+    ) -> int:
+        """Physically delete every row owned by ``user_id``.
+
+        Writes an immutable audit row into ``memory.gdpr_deletions`` BEFORE
+        performing any destructive delete, inside the same transaction.
+
+        Returns the number of memory rows deleted (or counted, on dry_run).
+        Raises ``ValueError`` if ``requestor`` is empty.
+        """
         ...

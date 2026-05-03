@@ -89,6 +89,8 @@ class PostgresMemoryProvider(MemoryProvider):
     transaction as the primary mutation.
     """
 
+    cascades_entities = True
+
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
@@ -491,6 +493,174 @@ class PostgresMemoryProvider(MemoryProvider):
                 )
 
         return _row_to_memory(row)
+
+    async def list_for_user(
+        self, user_id: uuid.UUID, include_invalidated: bool = False
+    ) -> list[Memory]:
+        """Return every memory for *user_id*, newest first."""
+        bitemporal = "" if include_invalidated else "AND valid_until IS NULL"
+        sql = f"""
+            SELECT memory_id, user_id, agent_id, org_id,
+                   memory_type, content, content_hash, embedding,
+                   importance, access_count, last_accessed, decay_rate,
+                   valid_from, valid_until,
+                   extraction_version, extraction_model, prompt_hash, rule_id,
+                   source_session_id, source_memory_ids,
+                   metadata, created_at, updated_at
+            FROM memory.memories
+            WHERE user_id = $1
+              {bitemporal}
+            ORDER BY created_at DESC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, user_id)
+        return [_row_to_memory(r) for r in rows]
+
+    async def physical_delete_user(
+        self, user_id: uuid.UUID, requestor: str, dry_run: bool = False
+    ) -> int:
+        """Physically delete every row owned by *user_id*.
+
+        Writes an audit row into ``memory.gdpr_deletions`` BEFORE any
+        destructive delete, inside the same transaction. On ``dry_run``
+        only the audit row is written (row counts are captured) and no
+        data is removed. Returns the number of memory rows.
+        """
+        if not requestor:
+            raise ValueError("requestor is required")
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                counts = await conn.fetchrow(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) FROM memory.memories WHERE user_id = $1) AS rows_memories,
+                        (SELECT COUNT(*) FROM memory.entities WHERE user_id = $1) AS rows_entities,
+                        (SELECT COUNT(*) FROM memory.entity_mentions em
+                            JOIN memory.entities e ON em.entity_id = e.entity_id
+                            WHERE e.user_id = $1) AS rows_mentions,
+                        (SELECT COUNT(*) FROM memory.episodes WHERE user_id = $1) AS rows_episodes,
+                        (SELECT COUNT(*) FROM memory.memory_history mh
+                            JOIN memory.memories m ON mh.memory_id = m.memory_id
+                            WHERE m.user_id = $1) AS rows_history
+                    """,
+                    user_id,
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO memory.gdpr_deletions
+                        (id, user_id, requestor, reason,
+                         rows_memories, rows_entities, rows_mentions,
+                         rows_episodes, rows_history,
+                         occurred_at, dry_run)
+                    VALUES ($1, $2, $3, $4,
+                            $5, $6, $7,
+                            $8, $9,
+                            $10, $11)
+                    """,
+                    uuid.uuid4(),
+                    user_id,
+                    requestor,
+                    "user_request",
+                    int(counts["rows_memories"]),
+                    int(counts["rows_entities"]),
+                    int(counts["rows_mentions"]),
+                    int(counts["rows_episodes"]),
+                    int(counts["rows_history"]),
+                    datetime.now(timezone.utc),
+                    dry_run,
+                )
+
+                if dry_run:
+                    return int(counts["rows_memories"])
+
+                await conn.execute(
+                    """
+                    UPDATE memory.memories
+                    SET valid_until = now(),
+                        metadata = metadata
+                            || jsonb_build_object('invalidation_reason', 'gdpr_source_deleted')
+                    WHERE user_id <> $1
+                      AND source_memory_ids && (
+                          SELECT COALESCE(array_agg(memory_id), ARRAY[]::uuid[])
+                          FROM memory.memories WHERE user_id = $1
+                      )
+                      AND valid_until IS NULL
+                    """,
+                    user_id,
+                )
+
+                await conn.execute(
+                    """
+                    DELETE FROM memory.memory_history
+                    WHERE memory_id IN (
+                        SELECT memory_id FROM memory.memories WHERE user_id = $1
+                    )
+                    """,
+                    user_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM memory.entity_mentions
+                    WHERE entity_id IN (
+                        SELECT entity_id FROM memory.entities WHERE user_id = $1
+                    )
+                    """,
+                    user_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM memory.entity_mentions
+                    WHERE memory_id IN (
+                        SELECT memory_id FROM memory.memories WHERE user_id = $1
+                    )
+                    """,
+                    user_id,
+                )
+                await conn.execute(
+                    "DELETE FROM memory.entities WHERE user_id = $1",
+                    user_id,
+                )
+                await conn.execute(
+                    "DELETE FROM memory.episodes WHERE user_id = $1",
+                    user_id,
+                )
+                await conn.execute(
+                    "DELETE FROM memory.memories WHERE user_id = $1",
+                    user_id,
+                )
+
+        return int(counts["rows_memories"])
+
+    async def select_by_extraction_version_below(
+        self, user_id: uuid.UUID, target_version: str
+    ) -> list[Memory]:
+        """Return active memories for *user_id* whose extraction_version is
+        strictly less than *target_version* (semver tuple order)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT memory_id, user_id, agent_id, org_id,
+                       memory_type, content, content_hash, embedding,
+                       importance, access_count, last_accessed, decay_rate,
+                       valid_from, valid_until,
+                       extraction_version, extraction_model, prompt_hash, rule_id,
+                       source_session_id, source_memory_ids,
+                       metadata, created_at, updated_at
+                FROM memory.memories
+                WHERE user_id = $1
+                  AND extraction_version IS NOT NULL
+                  AND extraction_version ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$'
+                  AND valid_until IS NULL
+                  AND string_to_array(extraction_version, '.')::int[]
+                      < string_to_array($2, '.')::int[]
+                ORDER BY created_at ASC
+                """,
+                user_id,
+                target_version,
+            )
+        return [_row_to_memory(r) for r in rows]
 
     async def get_history(self, memory_id: uuid.UUID) -> list[MemoryHistoryEntry]:
         """Return the mutation history for *memory_id*, newest first."""

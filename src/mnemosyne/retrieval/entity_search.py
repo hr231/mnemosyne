@@ -1,3 +1,16 @@
+"""Entity-aware retrieval.
+
+Public surface: ``entity_aware_search`` is a STANDALONE function.
+The ``MemoryProvider.search()`` signature is unchanged. Callers pick explicitly:
+
+- Pure vector search: ``provider.search(...)``
+- Entity-boosted search: ``entity_aware_search(provider, entity_store, ...)``
+
+Reflections are not a special case for retrieval — they are persisted as
+regular memories with ``memory_type=MemoryType.REFLECTION`` and ranked via
+the same vector + RRF path as any other memory.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -35,15 +48,21 @@ async def entity_aware_search(
     embedder: EmbeddingClient | None = None,
     limit: int = 10,
     weights: ScoringWeights | None = None,
+    entity_filter: list[str] | None = None,
 ) -> list[ScoredMemory]:
     """Search memories using both vector similarity and entity expansion.
 
     When entity_store is None or NER is unavailable, falls back to
     pure vector search via provider.search().
 
+    When ``entity_filter`` is provided, expansion is restricted to entities
+    whose normalised name matches one of the supplied values — the query-side
+    NER pass is skipped and only the explicit filter is used.
+
     Steps:
     1. Run standard vector search
-    2. Extract entities from query (spaCy + GLiNER, no LLM for latency)
+    2. Extract entities from query (spaCy + GLiNER, no LLM for latency) or
+       honour ``entity_filter`` when set
     3. Look up matching entities in entity_store
     4. Expand via entity_mentions to related memory_ids (capped at 50 per entity)
     5. Fetch those memories
@@ -58,9 +77,14 @@ async def entity_aware_search(
     if entity_store is None:
         return vector_results[:limit]
 
-    # Step 2: Extract entities from query
+    # Step 2: Extract entities from query (or honour explicit filter)
     entity_results = await _get_entity_memories(
-        query_text, user_id, entity_store, provider, embedder
+        query_text,
+        user_id,
+        entity_store,
+        provider,
+        embedder,
+        entity_filter=entity_filter,
     )
 
     if not entity_results:
@@ -77,50 +101,83 @@ async def _get_entity_memories(
     entity_store: "EntityStore",
     provider: MemoryProvider,
     embedder: EmbeddingClient | None = None,
+    entity_filter: list[str] | None = None,
 ) -> list[ScoredMemory]:
-    """Extract entities from query and expand to related memories."""
-    # Try NER extraction (graceful degradation if not installed)
-    raw_entities = []
-    try:
-        from mnemosyne.pipeline.ner.spacy_extractor import extract_entities_spacy
-        raw_entities.extend(extract_entities_spacy(query_text))
-    except Exception:
-        pass
+    """Extract entities from query (or honour filter) and expand to related memories."""
+    raw_entities: list[_SimpleEntity] = []
 
-    try:
-        from mnemosyne.pipeline.ner.gliner_extractor import extract_entities_gliner
-        raw_entities.extend(extract_entities_gliner(query_text))
-    except Exception:
-        pass
-
-    if not raw_entities:
-        # Try simple name-based lookup as fallback: each word that is long
-        # enough might be a known entity name.
-        for word in query_text.split():
-            if len(word) < 3:
+    # Explicit filter: skip NER, honour the caller's restriction verbatim.
+    if entity_filter is not None:
+        for name in entity_filter:
+            if not name or not name.strip():
                 continue
-            for entity_type in ("person", "organization", "product", "brand", "location"):
-                found = await entity_store.find_by_name(user_id, word, entity_type)
+            # Try every known entity_type — caller does not have to specify.
+            for entity_type in (
+                "person", "organization", "product", "brand", "location", "concept",
+            ):
+                found = await entity_store.find_by_name(user_id, name, entity_type)
                 if found is not None:
-                    raw_entities.append(_SimpleEntity(
-                        name=word,
-                        entity_type=entity_type,
-                    ))
+                    raw_entities.append(
+                        _SimpleEntity(name=name, entity_type=entity_type)
+                    )
                     break
+        if not raw_entities and embedder is not None:
+            for name in entity_filter:
+                try:
+                    name_emb = await embedder.embed(name)
+                    cands = await entity_store.find_by_embedding(
+                        user_id, name_emb, threshold=0.80, limit=3
+                    )
+                    for ent in cands:
+                        raw_entities.append(
+                            _SimpleEntity(
+                                name=ent.entity_name, entity_type=ent.entity_type
+                            )
+                        )
+                except Exception:
+                    continue
+    else:
+        # Try NER extraction (graceful degradation if not installed)
+        try:
+            from mnemosyne.pipeline.ner.spacy_extractor import extract_entities_spacy
+            raw_entities.extend(extract_entities_spacy(query_text))
+        except Exception:
+            pass
 
-    if not raw_entities:
-        # Last resort: embedding similarity if embedder is available
-        if embedder:
+        try:
+            from mnemosyne.pipeline.ner.gliner_extractor import extract_entities_gliner
+            raw_entities.extend(extract_entities_gliner(query_text))
+        except Exception:
+            pass
+
+        if not raw_entities:
+            # Simple name-based fallback: each word long enough may be an entity.
+            for word in query_text.split():
+                if len(word) < 3:
+                    continue
+                for entity_type in (
+                    "person", "organization", "product", "brand", "location",
+                ):
+                    found = await entity_store.find_by_name(user_id, word, entity_type)
+                    if found is not None:
+                        raw_entities.append(
+                            _SimpleEntity(name=word, entity_type=entity_type)
+                        )
+                        break
+
+        if not raw_entities and embedder is not None:
+            # Last resort: embedding similarity against registered entities.
             try:
                 query_emb = await embedder.embed(query_text)
                 similar_entities = await entity_store.find_by_embedding(
                     user_id, query_emb, threshold=0.80, limit=5
                 )
                 for ent in similar_entities:
-                    raw_entities.append(_SimpleEntity(
-                        name=ent.entity_name,
-                        entity_type=ent.entity_type,
-                    ))
+                    raw_entities.append(
+                        _SimpleEntity(
+                            name=ent.entity_name, entity_type=ent.entity_type
+                        )
+                    )
             except Exception:
                 pass
 

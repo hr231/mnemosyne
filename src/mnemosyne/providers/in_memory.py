@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from mnemosyne.db.models.history import MemoryHistoryEntry
-from mnemosyne.db.models.memory import Memory, ScoredMemory
+from mnemosyne.db.models.memory import Memory, MemoryType, ScoredMemory
 from mnemosyne.errors import MemoryNotFound
 from mnemosyne.providers.base import MemoryProvider
 from mnemosyne.retrieval.scoring import MultiSignalScorer, ScoringWeights
@@ -35,6 +35,7 @@ class InMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._memories: dict[uuid.UUID, Memory] = {}
         self._history: list[MemoryHistoryEntry] = []
+        self._gdpr_audit: list[dict] = []
 
     # ------------------------------------------------------------------
     # MemoryProvider interface
@@ -195,3 +196,103 @@ class InMemoryProvider(MemoryProvider):
         entries = [h for h in self._history if h.memory_id == memory_id]
         entries.sort(key=lambda h: h.occurred_at, reverse=True)
         return entries
+
+    async def list_for_user(
+        self, user_id: uuid.UUID, include_invalidated: bool = False
+    ) -> list[Memory]:
+        """Return every memory for *user_id*, newest first."""
+        out = [
+            m
+            for m in self._memories.values()
+            if m.user_id == user_id and (include_invalidated or m.valid_until is None)
+        ]
+        out.sort(key=lambda m: m.created_at, reverse=True)
+        return out
+
+    async def physical_delete_user(
+        self, user_id: uuid.UUID, requestor: str, dry_run: bool = False
+    ) -> int:
+        """Physically drop every memory + history row for *user_id*.
+
+        Appends an entry to ``self._gdpr_audit`` BEFORE deletion so the
+        audit intent is observable even on dry_run.
+        """
+        if not requestor:
+            raise ValueError("requestor is required")
+
+        to_delete = [mid for mid, m in self._memories.items() if m.user_id == user_id]
+        history_count = sum(1 for h in self._history if h.memory_id in set(to_delete))
+
+        self._gdpr_audit.append(
+            {
+                "id": uuid.uuid4(),
+                "user_id": user_id,
+                "requestor": requestor,
+                "reason": "user_request",
+                "rows_memories": len(to_delete),
+                "rows_history": history_count,
+                "dry_run": dry_run,
+                "occurred_at": datetime.now(timezone.utc),
+            }
+        )
+        if dry_run:
+            return len(to_delete)
+
+        deleted_set = set(to_delete)
+
+        # Soft-invalidate cross-user reflections that source any deleted memory.
+        # The rows are retained (audit trail); only valid_until + reason are stamped.
+        now = datetime.now(timezone.utc)
+        for mem in self._memories.values():
+            if mem.user_id == user_id:
+                continue
+            if mem.memory_type != MemoryType.REFLECTION:
+                continue
+            if mem.valid_until is not None:
+                continue
+            if not any(sid in deleted_set for sid in mem.source_memory_ids):
+                continue
+            mem.valid_until = now
+            mem.metadata["invalidation_reason"] = "gdpr_source_deleted"
+
+        for mid in to_delete:
+            del self._memories[mid]
+        self._history = [h for h in self._history if h.memory_id not in deleted_set]
+        return len(to_delete)
+
+    async def select_by_extraction_version_below(
+        self, user_id: uuid.UUID, target_version: str
+    ) -> list[Memory]:
+        """Return active memories for *user_id* whose extraction_version is
+        strictly less than *target_version* (semver tuple order)."""
+        target = _version_key(target_version)
+        if target is None:
+            return []
+        out: list[Memory] = []
+        for mem in self._memories.values():
+            if mem.user_id != user_id:
+                continue
+            if mem.valid_until is not None:
+                continue
+            if mem.extraction_version is None:
+                continue
+            key = _version_key(mem.extraction_version)
+            if key is None:
+                continue
+            if key < target:
+                out.append(mem)
+        out.sort(key=lambda m: m.created_at)
+        return out
+
+
+def _version_key(v: str) -> tuple[int, int, int] | None:
+    """Parse a semver string into a comparable tuple. Returns None on failure."""
+    if not v:
+        return None
+    parts = v.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None

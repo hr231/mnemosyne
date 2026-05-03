@@ -1,3 +1,17 @@
+"""Reflection generation.
+
+Reflections are persisted as first-class :class:`Memory` rows with
+``memory_type=MemoryType.REFLECTION``. Retrieval does NOT branch on reflection
+type — reflections rank via the same vector + RRF paths as any other memory.
+Recursive depth is enforced via ``metadata["reflection_depth"]`` capped at
+``MAX_REFLECTION_DEPTH`` (=2): memories at that depth are excluded from the
+importance-sum trigger so the pipeline cannot recurse indefinitely.
+
+Runner entry point: :func:`maybe_run_reflection` — fires only when the
+importance sum crosses the Generative-Agents-style threshold; otherwise a
+no-op that returns 0.
+"""
+
 from __future__ import annotations
 
 import json
@@ -124,3 +138,25 @@ async def generate_reflections(
         len(reflections), user_id, new_depth,
     )
     return reflections
+
+
+async def maybe_run_reflection(
+    provider: MemoryProvider,
+    llm: LLMClient,
+    embedder: EmbeddingClient,
+    user_id: uuid.UUID,
+) -> int:
+    """Trigger reflection if the importance-sum threshold has been crossed.
+
+    Returns the number of reflection memories persisted. When the trigger
+    does not fire, returns 0 without invoking the LLM.
+    """
+    if not await should_generate_reflection(provider, user_id):
+        return 0
+    reflections = await generate_reflections(
+        provider=provider,
+        user_id=user_id,
+        llm_client=llm,
+        embedder=embedder,
+    )
+    return len(reflections)

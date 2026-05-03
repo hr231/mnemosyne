@@ -3,7 +3,30 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class MonitoringConfig(BaseModel):
+    """Runtime settings for the Prometheus metrics exporter."""
+
+    enabled: bool = True
+    port: int = 9090
+
+
+class StartupConfig(BaseModel):
+    """Settings governing startup sanity checks."""
+
+    fail_fast: bool = True
+    required_env_vars: list[str] = Field(
+        default_factory=lambda: ["MNEMOSYNE_PG_DSN"]
+    )
+
+
+class MnemosyneConfig(BaseModel):
+    """Top-level YAML-backed configuration for the memory subsystem."""
+
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    startup: StartupConfig = Field(default_factory=StartupConfig)
 
 
 class Settings(BaseModel):
