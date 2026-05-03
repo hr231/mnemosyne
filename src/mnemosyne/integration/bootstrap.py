@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mnemosyne.config.startup_checks import (
     Check,
     StartupCheckReport,
     run_startup_checks,
 )
-from mnemosyne.monitoring.metrics import global_registry
-from mnemosyne.monitoring.prometheus_exporter import PrometheusExporter
+
+if TYPE_CHECKING:
+    from mnemosyne.monitoring.prometheus_exporter import PrometheusExporter
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,7 @@ class BootstrapContext:
     """Result of bootstrapping the memory subsystem."""
 
     report: StartupCheckReport
-    exporter: PrometheusExporter | None
+    exporter: "PrometheusExporter | None"
 
 
 async def bootstrap_memory_subsystem(
@@ -36,15 +38,19 @@ async def bootstrap_memory_subsystem(
     StartupCheckFailed.
 
     The exporter is only started when start_exporter=True and
-    MNEMOSYNE_METRICS_ENABLED is not "0".
+    MNEMOSYNE_METRICS_ENABLED is not "0". prometheus_client is imported
+    lazily so the integration package can be loaded without it installed.
     """
     if fail_fast is None:
         fail_fast = os.environ.get("MNEMOSYNE_STARTUP_WARN_ONLY", "0") != "1"
 
     report = await run_startup_checks(checks=checks, fail_fast=fail_fast)
 
-    exporter: PrometheusExporter | None = None
+    exporter: "PrometheusExporter | None" = None
     if start_exporter and os.environ.get("MNEMOSYNE_METRICS_ENABLED", "1") == "1":
+        from mnemosyne.monitoring.metrics import global_registry
+        from mnemosyne.monitoring.prometheus_exporter import PrometheusExporter
+
         exporter = PrometheusExporter(global_registry())
         exporter.serve_in_background()
 

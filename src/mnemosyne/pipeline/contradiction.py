@@ -5,7 +5,9 @@ import uuid
 from datetime import datetime, timezone
 from enum import StrEnum
 
+from mnemosyne.db.models.contradiction_audit import ContradictionAudit
 from mnemosyne.db.models.memory import Memory, MemoryType
+from mnemosyne.db.repositories.contradiction_audit import ContradictionAuditStore
 from mnemosyne.embedding.base import EmbeddingClient
 from mnemosyne.llm.base import LLMClient
 from mnemosyne.providers.base import MemoryProvider
@@ -169,20 +171,25 @@ async def resolve_contradiction(
     provider: MemoryProvider,
     llm_client: LLMClient,
     embedder: EmbeddingClient,
+    audit_store: ContradictionAuditStore | None = None,
+    nli_scores: dict[str, float] | None = None,
 ) -> ContradictionAction:
-    """Adjudicate a single contradiction pair via LLM and execute the action.
+    """Adjudicate a contradiction pair via LLM and execute the action.
 
-    Returns the chosen ContradictionAction. On LLM failure, defaults to
-    KEEP_BOTH so no data is accidentally discarded.
+    When ``audit_store`` is provided, an audit row is persisted before the
+    action is applied. Audit-store failures are logged at WARNING level but
+    never block the resolution. A structured INFO log line is emitted on every
+    resolution, regardless of audit-store success.
     """
     prompt = ADJUDICATION_PROMPT.format(
         old_content=old_memory.content,
         new_content=new_memory.content,
     )
 
+    raw_response: str | None = None
     try:
-        response = await llm_client.complete(prompt)
-        action = _parse_action(response)
+        raw_response = await llm_client.complete(prompt)
+        action = _parse_action(raw_response)
     except Exception as exc:
         logger.warning(
             "LLM adjudication failed for pair (%s, %s): %s — defaulting to KEEP_BOTH",
@@ -192,15 +199,56 @@ async def resolve_contradiction(
         )
         action = ContradictionAction.KEEP_BOTH
 
-    await _execute_action(action, new_memory, old_memory, provider, embedder)
+    applied = False
+    action_exc: BaseException | None = None
+    try:
+        try:
+            await _execute_action(action, new_memory, old_memory, provider, embedder)
+            applied = True
+        except BaseException as exc:
+            action_exc = exc
+            logger.warning(
+                "Contradiction action %s failed for pair (%s, %s): %s",
+                action.value,
+                old_memory.memory_id,
+                new_memory.memory_id,
+                exc,
+            )
 
-    logger.info(
-        "Contradiction resolved: action=%s old=%s new=%s score=%.2f",
-        action.value,
-        old_memory.memory_id,
-        new_memory.memory_id,
-        contradiction_score,
-    )
+        if audit_store is not None:
+            entry = ContradictionAudit(
+                id=uuid.uuid4(),
+                user_id=new_memory.user_id,
+                detected_at=datetime.now(timezone.utc),
+                new_memory_id=new_memory.memory_id,
+                existing_memory_id=old_memory.memory_id,
+                nli_scores=dict(nli_scores or {"contradiction": contradiction_score}),
+                llm_adjudication=raw_response,
+                resolution=action.value,
+                reasoning=None,
+                applied=applied,
+            )
+            try:
+                await audit_store.record(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Contradiction audit row failed for pair (%s, %s): %s",
+                    old_memory.memory_id,
+                    new_memory.memory_id,
+                    exc,
+                )
+    finally:
+        logger.info(
+            "Contradiction resolved: action=%s old=%s new=%s score=%.2f user=%s",
+            action.value,
+            old_memory.memory_id,
+            new_memory.memory_id,
+            contradiction_score,
+            new_memory.user_id,
+        )
+
+    if action_exc is not None:
+        raise action_exc
     return action
 
 
@@ -211,13 +259,15 @@ async def run_contradiction_check(
     embedder: EmbeddingClient,
     use_nli: bool = True,
     created_after: datetime | None = None,
+    audit_store: ContradictionAuditStore | None = None,
 ) -> int:
     """Check recent memories for contradictions and resolve each found pair.
 
     Iterates over the user's recent memories (up to 50), runs
     detect_contradictions for each, and calls resolve_contradiction on pairs
     above the low-confidence threshold. Tracks which pairs have been checked
-    to avoid double-processing.
+    to avoid double-processing. When ``audit_store`` is provided, every
+    resolution writes an audit row.
 
     Returns the count of contradiction pairs resolved.
     """
@@ -259,7 +309,14 @@ async def run_contradiction_check(
                         old_mem.memory_id,
                     )
                 await resolve_contradiction(
-                    mem, old_mem, score, provider, llm_client, embedder
+                    mem,
+                    old_mem,
+                    score,
+                    provider,
+                    llm_client,
+                    embedder,
+                    audit_store=audit_store,
+                    nli_scores={"contradiction": score},
                 )
                 resolved += 1
 

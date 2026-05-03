@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from mnemosyne.context.token_budget import TokenBudget
 from mnemosyne.db.models.memory import ScoredMemory
 from mnemosyne.embedding.base import EmbeddingClient
+from mnemosyne.monitoring.metrics import global_registry
 from mnemosyne.providers.base import MemoryProvider
 
 _ENC = tiktoken.encoding_for_model("gpt-4")
@@ -77,9 +78,20 @@ async def assemble_context(
         if s.content
     ]
     text = "".join(s.content for s in sections)
+
+    reg = global_registry()
+    used = budget.used
+    cap = max(1, token_budget)
+    utilization = used / cap
+    reg.set_context_token_utilization(utilization)
+    if utilization >= 0.95:
+        reg.record_context_truncate()
+    else:
+        reg.record_context_inject()
+
     return ContextBlock(
         text=text,
-        token_count=budget.used,
+        token_count=used,
         sections=sections,
     )
 

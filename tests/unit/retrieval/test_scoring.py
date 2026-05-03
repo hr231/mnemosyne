@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -140,7 +140,7 @@ class TestMultiSignalScorer:
 
     def test_recency_naive_datetime_handled(self) -> None:
         """Scorer must not raise when last_accessed or now lacks tzinfo."""
-        naive_now = datetime.utcnow()
+        naive_now = datetime.now(UTC).replace(tzinfo=None)
         naive_accessed = naive_now - timedelta(days=1)
         memory = _make_memory(last_accessed=naive_accessed)
         scorer = MultiSignalScorer()

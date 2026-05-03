@@ -5,6 +5,8 @@ import math
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from pydantic import BaseModel, Field
+
 from mnemosyne.db.models.memory import Memory
 from mnemosyne.providers.base import MemoryProvider
 
@@ -13,6 +15,35 @@ logger = logging.getLogger(__name__)
 # Default thresholds — all overridable via function parameters.
 DEFAULT_ARCHIVE_THRESHOLD: float = 0.05
 DEFAULT_ARCHIVE_AFTER_DAYS: int = 90
+DEFAULT_HALF_LIFE_DAYS: float = 60.0
+
+
+class DecayConfig(BaseModel):
+    """Tunable parameters for the decay worker."""
+
+    importance_half_life_days: float = Field(
+        default=DEFAULT_HALF_LIFE_DAYS, gt=0.0
+    )
+    archival_threshold: float = Field(
+        default=DEFAULT_ARCHIVE_THRESHOLD, ge=0.0, le=1.0
+    )
+    archival_age_days_min: int = Field(
+        default=DEFAULT_ARCHIVE_AFTER_DAYS, ge=0
+    )
+
+    @classmethod
+    def from_settings(cls, settings: object) -> "DecayConfig":
+        """Build a config from any object with optional matching attributes."""
+        kwargs: dict = {}
+        if hasattr(settings, "decay_archival_threshold"):
+            kwargs["archival_threshold"] = settings.decay_archival_threshold
+        if hasattr(settings, "decay_archival_age_days_min"):
+            kwargs["archival_age_days_min"] = settings.decay_archival_age_days_min
+        if hasattr(settings, "decay_importance_half_life_days"):
+            kwargs["importance_half_life_days"] = (
+                settings.decay_importance_half_life_days
+            )
+        return cls(**kwargs)
 
 
 def compute_decayed_importance(memory: Memory, now: datetime | None = None) -> float:
@@ -248,3 +279,19 @@ def _days_since(last_accessed: datetime, now: datetime) -> float:
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     return (now - last).total_seconds() / 86400.0
+
+
+async def apply_decay_with_config(
+    provider: MemoryProvider,
+    config: DecayConfig,
+    user_id: uuid.UUID | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Run decay using a DecayConfig object. Thin wrapper over apply_decay."""
+    return await apply_decay(
+        provider=provider,
+        user_id=user_id,
+        archive_threshold=config.archival_threshold,
+        archive_after_days=config.archival_age_days_min,
+        dry_run=dry_run,
+    )

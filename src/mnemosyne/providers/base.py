@@ -58,12 +58,24 @@ class MemoryProvider(ABC):
         limit: int = 10,
         weights: ScoringWeights | None = None,
         include_invalidated: bool = False,
+        explain: bool = False,
+        source_message_id: uuid.UUID | None = None,
     ) -> list[ScoredMemory]:
         """Return up to *limit* scored memories for *user_id*.
 
         Default behaviour filters out invalidated memories
         (``valid_until IS NOT NULL AND valid_until <= now()``).
         Pass ``include_invalidated=True`` for historical queries.
+
+        When ``explain=True``, every returned :class:`ScoredMemory` MUST carry
+        a populated ``score_breakdown_explain`` field. When ``False`` (the
+        default), the field MUST be ``None``. Backends that cannot honour the
+        contract should raise ``NotImplementedError``; both first-party
+        backends honour it.
+
+        When ``source_message_id`` is set, results are restricted to memories
+        whose ``metadata['source_message_ids']`` contains that UUID. Backends
+        without provenance metadata may ignore the filter.
 
         Side-effects: increments ``access_count`` and sets
         ``last_accessed`` on every memory in the returned list.

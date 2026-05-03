@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from mnemosyne.db.models.contradiction_audit import ContradictionAudit
 from mnemosyne.db.models.memory import Memory
 
 
@@ -69,3 +70,18 @@ class ToggleExtractionRequest(BaseModel):
 class ToggleExtractionResponse(BaseModel):
     user_id: uuid.UUID
     enabled: bool
+
+
+class ListContradictionsRequest(BaseModel):
+    """Page through resolved contradictions for a user."""
+
+    user_id: uuid.UUID
+    limit: int = Field(50, ge=1, le=500)
+    offset: int = Field(0, ge=0)
+    since: datetime | None = None
+
+
+class ListContradictionsResponse(BaseModel):
+    user_id: uuid.UUID
+    total: int
+    items: list[ContradictionAudit]

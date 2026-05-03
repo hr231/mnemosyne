@@ -254,6 +254,8 @@ class PostgresMemoryProvider(MemoryProvider):
         limit: int = 10,
         weights: ScoringWeights | None = None,
         include_invalidated: bool = False,
+        explain: bool = False,
+        source_message_id: uuid.UUID | None = None,
     ) -> list[ScoredMemory]:
         """Return up to *limit* scored memories for *user_id*.
 
@@ -262,6 +264,10 @@ class PostgresMemoryProvider(MemoryProvider):
         Stage 2: Python-side re-rank — MultiSignalScorer (relevance, recency,
         importance, frequency).
         Stage 3: Slice to *limit*, bump access_count / last_accessed.
+
+        When ``source_message_id`` is set, the candidate set is restricted
+        to memories whose ``metadata['source_message_ids']`` array contains
+        that UUID.
 
         Side-effects: increments ``access_count`` and sets ``last_accessed``
         on every memory in the returned list.
@@ -273,6 +279,14 @@ class PostgresMemoryProvider(MemoryProvider):
             if include_invalidated
             else "AND (valid_until IS NULL OR valid_until > now())"
         )
+
+        provenance_clause = ""
+        params: list[Any] = [query_embedding, user_id, prefetch]
+        if source_message_id is not None:
+            provenance_clause = (
+                "AND metadata -> 'source_message_ids' ? $4"
+            )
+            params.append(str(source_message_id))
 
         sql = f"""
             SELECT memory_id, user_id, agent_id, org_id,
@@ -287,12 +301,13 @@ class PostgresMemoryProvider(MemoryProvider):
             WHERE user_id = $2
               AND embedding IS NOT NULL
               {bitemporal_clause}
+              {provenance_clause}
             ORDER BY embedding <=> $1::halfvec
             LIMIT $3
         """
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(sql, query_embedding, user_id, prefetch)
+            rows = await conn.fetch(sql, *params)
 
         if not rows:
             return []
@@ -306,8 +321,16 @@ class PostgresMemoryProvider(MemoryProvider):
         for mem in candidates:
             if mem.embedding is None:
                 continue
-            total, breakdown = scorer.score(mem, query_embedding, now)
-            scored.append(ScoredMemory(memory=mem, score=total, score_breakdown=breakdown))
+            if explain:
+                total, bd = scorer.score(mem, query_embedding, now, explain=True)
+                scored.append(
+                    ScoredMemory(memory=mem, score=total, score_breakdown_explain=bd)
+                )
+            else:
+                total, breakdown = scorer.score(mem, query_embedding, now)
+                scored.append(
+                    ScoredMemory(memory=mem, score=total, score_breakdown=breakdown)
+                )
 
         # Deterministic sort: highest score first; ties broken by newest then
         # ascending memory_id for stability.
@@ -323,22 +346,31 @@ class PostgresMemoryProvider(MemoryProvider):
         if not result:
             return []
 
-        # Bump access bookkeeping on returned slice
+        # Bump access bookkeeping on returned slice.
+        # GREATEST(now(), last_accessed) guarantees monotonicity even when the
+        # Postgres server clock trails the client clock that produced the
+        # original last_accessed at insert time.
         returned_ids = [sm.memory.memory_id for sm in result]
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            updated = await conn.fetch(
                 """
                 UPDATE memory.memories
-                SET access_count = access_count + 1, last_accessed = now()
+                SET access_count = access_count + 1,
+                    last_accessed = GREATEST(now(), last_accessed)
                 WHERE memory_id = ANY($1::uuid[])
+                RETURNING memory_id, last_accessed
                 """,
                 returned_ids,
             )
 
-        now = datetime.now(timezone.utc)
+        new_last_accessed: dict[uuid.UUID, datetime] = {
+            row["memory_id"]: row["last_accessed"] for row in updated
+        }
         for sm in result:
             sm.memory.access_count += 1
-            sm.memory.last_accessed = now
+            ts = new_last_accessed.get(sm.memory.memory_id)
+            if ts is not None:
+                sm.memory.last_accessed = ts
 
         return result
 

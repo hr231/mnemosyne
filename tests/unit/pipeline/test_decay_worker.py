@@ -9,6 +9,9 @@ import pytest
 from mnemosyne.db.models.memory import Memory
 from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.decay import (
+    DEFAULT_ARCHIVE_AFTER_DAYS,
+    DEFAULT_ARCHIVE_THRESHOLD,
+    DecayConfig,
     apply_decay,
     compute_decayed_importance,
     should_archive,
@@ -232,3 +235,46 @@ class TestApplyDecay:
         stats = await apply_decay(provider, uuid.uuid4())
         assert stats["decayed"] == 0
         assert stats["archived"] == 0
+
+
+class TestDecayConfig:
+    def test_defaults_match_module_constants(self):
+        cfg = DecayConfig()
+        assert cfg.archival_threshold == DEFAULT_ARCHIVE_THRESHOLD
+        assert cfg.archival_age_days_min == DEFAULT_ARCHIVE_AFTER_DAYS
+        assert cfg.importance_half_life_days > 0
+
+    def test_validates_archival_threshold_lower_bound(self):
+        with pytest.raises(ValueError):
+            DecayConfig(archival_threshold=-0.1)
+
+    def test_validates_archival_threshold_upper_bound(self):
+        with pytest.raises(ValueError):
+            DecayConfig(archival_threshold=1.5)
+
+    def test_validates_archival_age_non_negative(self):
+        with pytest.raises(ValueError):
+            DecayConfig(archival_age_days_min=-1)
+
+    def test_validates_half_life_positive(self):
+        with pytest.raises(ValueError):
+            DecayConfig(importance_half_life_days=0)
+
+    def test_from_settings_accepts_settings_object(self):
+        class FakeSettings:
+            decay_archival_threshold = 0.07
+            decay_archival_age_days_min = 120
+            decay_importance_half_life_days = 30
+
+        cfg = DecayConfig.from_settings(FakeSettings())
+        assert cfg.archival_threshold == 0.07
+        assert cfg.archival_age_days_min == 120
+        assert cfg.importance_half_life_days == 30
+
+    def test_from_settings_falls_back_to_defaults(self):
+        class EmptySettings:
+            pass
+
+        cfg = DecayConfig.from_settings(EmptySettings())
+        assert cfg.archival_threshold == DEFAULT_ARCHIVE_THRESHOLD
+        assert cfg.archival_age_days_min == DEFAULT_ARCHIVE_AFTER_DAYS

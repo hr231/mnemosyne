@@ -59,6 +59,7 @@ class ScoredMemory(BaseModel):
     memory: Memory
     score: float
     score_breakdown: dict[str, float] = Field(default_factory=dict)
+    score_breakdown_explain: Any | None = None
 
 
 class ExtractionResult(BaseModel):

@@ -40,6 +40,11 @@ class ExtractionPipeline:
                 llm_client, extraction_version=settings.extraction_version
             )
 
+    @property
+    def provider(self) -> MemoryProvider:
+        """Read-only access to the underlying memory provider."""
+        return self._provider
+
     @classmethod
     def from_settings(
         cls,
@@ -70,11 +75,9 @@ class ExtractionPipeline:
             llm_client=llm_client,
         )
 
-    async def extract_only(self, text: str) -> list[ExtractionResult]:
-        """Run rule + LLM extraction on *text* without persisting.
-
-        Used by the re-extraction driver to compare what the current
-        extractor would produce against what is already stored.
+    async def _run_rule_and_llm(self, text: str) -> list[ExtractionResult]:
+        """Run rule extractors, then optionally route to the LLM, then
+        deduplicate by content hash. Does not embed or persist.
         """
         rule_results: list[ExtractionResult] = []
         total_matched_chars = 0
@@ -110,7 +113,15 @@ class ExtractionPipeline:
                 logger.warning(
                     "LLM extraction failed — using rule results only", exc_info=exc
                 )
+        return all_results
 
+    async def extract_only(self, text: str) -> list[ExtractionResult]:
+        """Run rule + LLM extraction on *text* without persisting.
+
+        Used by the re-extraction driver to compare what the current
+        extractor would produce against what is already stored.
+        """
+        all_results = await self._run_rule_and_llm(text)
         return [
             r.model_copy(
                 update={"extraction_version": self._settings.extraction_version}
@@ -124,42 +135,8 @@ class ExtractionPipeline:
         text: str,
     ) -> list[ExtractionResult]:
         """Extract memories from *text* and persist them."""
-        # --- Stage 1: run rule extractors ---
-        rule_results: list[ExtractionResult] = []
-        total_matched_chars = 0
-        for extractor in self._extractors:
-            if not extractor.enabled:
-                continue
-            try:
-                results = extractor.extract(text)
-                rule_results.extend(results)
-                total_matched_chars += sum(r.matched_chars for r in results)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "extractor %r raised — skipping", extractor.id, exc_info=exc
-                )
+        all_results = await self._run_rule_and_llm(text)
 
-        # --- Stage 2: routing decision ---
-        all_results = list(rule_results)
-        stats = ExtractionStats(
-            extracted_count=len(rule_results),
-            total_chars=len(text),
-            chars_matched_by_rules=total_matched_chars,
-        )
-        if self._llm_extractor and should_route_to_llm(
-            stats, self._settings.router_unstructured_threshold
-        ):
-            try:
-                llm_results = await self._llm_extractor.extract(text)
-                seen_hashes = {content_hash(r.content) for r in rule_results}
-                for lr in llm_results:
-                    if content_hash(lr.content) not in seen_hashes:
-                        all_results.append(lr)
-                        seen_hashes.add(content_hash(lr.content))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("LLM extraction failed — using rule results only", exc_info=exc)
-
-        # --- Stage 3: embed + persist ---
         final_results: list[ExtractionResult] = []
         for result in all_results:
             result = result.model_copy(

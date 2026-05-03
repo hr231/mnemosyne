@@ -206,10 +206,20 @@ MNEMOSYNE_EMBEDDING_DIM=768
 pip install "mnemosyne[fastembed]"
 ```
 
+Default model: `BAAI/bge-small-en-v1.5` (384-dim).
+
 ```
 MNEMOSYNE_EMBEDDING_PROVIDER=fastembed
 MNEMOSYNE_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 MNEMOSYNE_EMBEDDING_DIM=384
+```
+
+The model is downloaded on first use into `~/.cache/fastembed`. To
+exercise the integration test (which downloads the model and runs an
+end-to-end embed):
+
+```bash
+MNEMOSYNE_FASTEMBED_INTEGRATION=1 pytest tests/integration/test_fastembed.py -v
 ```
 
 ### Fake (testing)
@@ -370,6 +380,61 @@ async def end_session(session_id, user_id):
     )
 ```
 
+### Streaming messages instead of one text blob
+
+For agent servers that emit role-tagged turns, use the assembler + session pipeline
+instead of concatenating into a single string:
+
+```python
+import uuid
+from datetime import datetime, timezone
+
+from mnemosyne.config.settings import Settings
+from mnemosyne.integration.hooks import on_session_close
+from mnemosyne.integration.session_assembler import SessionAssembler
+from mnemosyne.integration.session_models import ConversationMessage
+from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
+from mnemosyne.pipeline.session_pipeline import SessionPipeline
+
+settings = Settings()
+extraction = ExtractionPipeline(settings=settings, provider=provider, embedder=embedder)
+session_pipeline = SessionPipeline(extraction)
+asm = SessionAssembler()
+
+# As each turn arrives:
+await asm.add_message(
+    session_id,
+    user_id,
+    ConversationMessage(
+        message_id=uuid.uuid4(),
+        role="user",
+        content="I prefer dark roast coffee",
+        sent_at=datetime.now(timezone.utc),
+    ),
+)
+
+# When the session closes:
+await on_session_close(
+    session_id,
+    user_id,
+    assembler=asm,
+    session_pipeline=session_pipeline,
+)
+```
+
+Each extracted memory carries `metadata["source_session_id"]` and
+`metadata["source_message_ids"]` so retrieval can be filtered to a single
+session or message via `provider.search(..., source_message_id=msg_id)`.
+
+To survive process restarts, set `MNEMOSYNE_SESSION_PERSIST=1` and use
+`PersistentSessionAssembler(pool)` instead of `SessionAssembler()`.
+
+The legacy single-text path is unchanged:
+
+```python
+await pipeline.process(user_id, "single concatenated transcript")
+```
+
 ## Memory Management API
 
 A typed service for user-facing memory operations: list, view, delete, export, and the GDPR physical-delete path.
@@ -434,6 +499,36 @@ if svc.is_extraction_enabled(user_id):
 ```
 
 Useful for an "incognito mode" or paused-agent UX.
+
+### Retrieval explain mode
+
+Pass `explain=True` to `MemoryProvider.search` to receive a per-signal score
+breakdown on each result. The breakdown carries the four raw signal values,
+the weights used, and both the unweighted and final score so the score that
+ranked the memory can be debugged or audited end-to-end.
+
+```python
+hits = await provider.search(
+    query_embedding,
+    user_id=user_id,
+    limit=5,
+    explain=True,
+)
+for h in hits:
+    bd = h.score_breakdown_explain
+    print(
+        f"score={h.score:.3f} "
+        f"relevance={bd.relevance:.3f} "
+        f"recency={bd.recency:.3f} "
+        f"importance={bd.importance:.3f} "
+        f"frequency={bd.frequency:.3f} "
+        f"weights={bd.weights}"
+    )
+```
+
+When `explain=False` (the default), `score_breakdown_explain` is `None`, and
+the legacy `score_breakdown: dict[str, float]` field is populated with the
+raw signal values for callers that already depend on it.
 
 ## Custom Rules
 
@@ -508,6 +603,38 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install "mnemosyne[nli]"
 ```
 
+### Auditing resolved contradictions
+
+Every time the contradiction resolver picks an action (SUPERSEDE, KEEP_BOTH,
+MERGE, KEEP_OLD), an audit row is written to `memory.contradiction_audit`
+before the action is applied. Operators can inspect the resolution history
+through the management API:
+
+```python
+import uuid
+from mnemosyne.integration.memory_management import MemoryManagementService
+from mnemosyne.integration.memory_management_models import ListContradictionsRequest
+from mnemosyne.db.repositories.contradiction_audit import PostgresContradictionAuditStore
+
+audit_store = PostgresContradictionAuditStore(pool)
+svc = MemoryManagementService(
+    provider=provider,
+    entity_store=entity_store,
+    audit_store=audit_store,
+)
+
+resp = await svc.list_contradictions(
+    ListContradictionsRequest(user_id=uuid.UUID("..."), limit=20)
+)
+for entry in resp.items:
+    print(entry.detected_at, entry.resolution, entry.new_memory_id, entry.existing_memory_id)
+```
+
+Audit-store write failures are logged at WARNING level and do not block the
+resolution. A structured INFO log line is emitted on every resolution
+regardless of audit-store success — grep your logs for
+`"Contradiction resolved:"` to see the live stream.
+
 ## Versioned Extraction
 
 When extraction rules or LLM prompts change, existing memories carry the old extractor's output. The version registry tracks rule + prompt fingerprints; the re-extraction driver reprocesses memories below a target version.
@@ -543,6 +670,9 @@ Exported metrics:
 | `mnemosyne_dedup_rate` | gauge | fraction of memories deduplicated |
 | `mnemosyne_decay_archive_total` | counter | memories archived by decay |
 | `mnemosyne_queue_depth` | gauge | pending sessions awaiting processing |
+| `mnemosyne_context_assembly_inject_total` | counter | context-assembly calls that fit within the token budget |
+| `mnemosyne_context_assembly_truncate_total` | counter | context-assembly calls that hit the budget cap |
+| `mnemosyne_context_assembly_token_utilization` | gauge | last call's used/budget ratio (0..1) |
 
 A `config/prometheus.example.yml` and `src/mnemosyne/monitoring/grafana_panel_example.json` are bundled to get you scraping and graphing in one paste.
 

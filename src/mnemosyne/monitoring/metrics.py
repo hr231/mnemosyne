@@ -18,6 +18,11 @@ class MetricsSnapshot:
     queue_depth: int
     dedup_merges: int
     decay_archived: int
+    session_queue_depth: int
+    session_dlq_total: int
+    context_assembly_inject_total: int
+    context_assembly_truncate_total: int
+    context_assembly_token_utilization: float
 
 
 @dataclass
@@ -25,8 +30,9 @@ class MetricsRegistry:
     """Thread-safe in-process metrics registry.
 
     Records extraction outcomes, retrieval latencies, pipeline lag,
-    queue depth, dedup merges, and decay archival counts. Exposes a
-    frozen snapshot for scrape endpoints to read without racing.
+    queue depth, dedup merges, decay archival, and session hook queue
+    state. Exposes a frozen snapshot for scrape endpoints to read
+    without racing.
     """
 
     _lock: Lock = field(default_factory=Lock)
@@ -37,6 +43,11 @@ class MetricsRegistry:
     _queue_depth: int = 0
     _dedup: int = 0
     _decay_archived: int = 0
+    _session_queue_depth: int = 0
+    _session_dlq_total: int = 0
+    _context_inject: int = 0
+    _context_truncate: int = 0
+    _context_utilization: float = 0.0
 
     def record_extraction(self, success: bool, latency_ms: float) -> None:
         with self._lock:
@@ -66,6 +77,26 @@ class MetricsRegistry:
         with self._lock:
             self._decay_archived += 1
 
+    def set_session_queue_depth(self, depth: int) -> None:
+        with self._lock:
+            self._session_queue_depth = depth
+
+    def record_session_dlq(self) -> None:
+        with self._lock:
+            self._session_dlq_total += 1
+
+    def record_context_inject(self) -> None:
+        with self._lock:
+            self._context_inject += 1
+
+    def record_context_truncate(self) -> None:
+        with self._lock:
+            self._context_truncate += 1
+
+    def set_context_token_utilization(self, ratio: float) -> None:
+        with self._lock:
+            self._context_utilization = max(0.0, min(1.0, float(ratio)))
+
     def snapshot(self) -> MetricsSnapshot:
         with self._lock:
             rate = (
@@ -91,6 +122,11 @@ class MetricsRegistry:
                 queue_depth=self._queue_depth,
                 dedup_merges=self._dedup,
                 decay_archived=self._decay_archived,
+                session_queue_depth=self._session_queue_depth,
+                session_dlq_total=self._session_dlq_total,
+                context_assembly_inject_total=self._context_inject,
+                context_assembly_truncate_total=self._context_truncate,
+                context_assembly_token_utilization=self._context_utilization,
             )
 
 

@@ -8,6 +8,23 @@ from pydantic import BaseModel, model_validator
 from mnemosyne.db.models.memory import Memory
 
 
+class ScoreBreakdown(BaseModel):
+    """Per-signal contribution explanation for a single scored memory.
+
+    ``weights`` mirrors the ``ScoringWeights`` used at scoring time so the
+    breakdown is self-describing: a consumer can recompute ``raw_total`` from
+    the four components and the weights without round-tripping into config.
+    """
+
+    relevance: float
+    recency: float
+    importance: float
+    frequency: float
+    weights: dict[str, float]
+    raw_total: float
+    final_score: float
+
+
 class ScoringWeights(BaseModel, frozen=True):
     """Per-deployment configurable weights for the four retrieval signals.
 
@@ -51,16 +68,14 @@ class MultiSignalScorer:
         memory: Memory,
         query_embedding: list[float],
         now: datetime,
-    ) -> tuple[float, dict[str, float]]:
-        """Return (total_score, per-signal breakdown) for *memory*.
+        explain: bool = False,
+    ) -> tuple[float, dict[str, float]] | tuple[float, ScoreBreakdown]:
+        """Return ``(total, breakdown)`` for *memory*.
 
-        Args:
-            memory: the Memory object to score
-            query_embedding: the query vector (unit-normalised recommended)
-            now: the reference datetime used to compute recency decay
-
-        Returns:
-            A tuple of (total weighted score, dict with individual signal values)
+        When ``explain=False`` (the default) the second element is the
+        legacy ``dict[str, float]`` of raw signal values. When ``explain=True``
+        it is a :class:`ScoreBreakdown` carrying the four components, the
+        weights used, and both raw and final totals.
         """
         # 1. Relevance: cosine similarity between query and stored embedding
         relevance = self._cosine_sim(query_embedding, memory.embedding or [])
@@ -80,13 +95,6 @@ class MultiSignalScorer:
         # 4. Frequency: log-scaled access count normalised against cap of 100
         frequency = math.log1p(memory.access_count) / math.log1p(100)
 
-        breakdown: dict[str, float] = {
-            "relevance": relevance,
-            "recency": recency,
-            "importance": importance,
-            "frequency": frequency,
-        }
-
         total = (
             self.weights.relevance * relevance
             + self.weights.recency * recency
@@ -94,6 +102,28 @@ class MultiSignalScorer:
             + self.weights.frequency * frequency
         )
 
+        if not explain:
+            return total, {
+                "relevance": relevance,
+                "recency": recency,
+                "importance": importance,
+                "frequency": frequency,
+            }
+
+        breakdown = ScoreBreakdown(
+            relevance=relevance,
+            recency=recency,
+            importance=importance,
+            frequency=frequency,
+            weights={
+                "relevance": self.weights.relevance,
+                "recency": self.weights.recency,
+                "importance": self.weights.importance,
+                "frequency": self.weights.frequency,
+            },
+            raw_total=total,
+            final_score=total,
+        )
         return total, breakdown
 
     @staticmethod

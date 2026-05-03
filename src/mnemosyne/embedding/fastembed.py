@@ -8,7 +8,24 @@ logger = logging.getLogger(__name__)
 
 
 class FastEmbedClient(EmbeddingClient):
-    """Local embedding client using FastEmbed (Qdrant). Zero API dependency."""
+    """Local embedding client using FastEmbed (Qdrant). Zero API dependency.
+
+    The model is loaded lazily on first call to ``embed`` / ``embed_batch``.
+    First load downloads the ONNX weights to the FastEmbed cache (default
+    ``~/.cache/fastembed``); subsequent loads are local-only.
+
+    Setup
+    -----
+    Install the optional extra::
+
+        pip install 'mnemosyne[fastembed]'
+
+    Default model is ``BAAI/bge-small-en-v1.5`` (384-dim). To pick a
+    different model, pass ``model_name`` explicitly::
+
+        FastEmbedClient(model_name="BAAI/bge-base-en-v1.5")
+
+    """
 
     def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", **kwargs):
         self._model_name = model_name

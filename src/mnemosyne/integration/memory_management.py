@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from mnemosyne.db.models.memory import Memory
+from mnemosyne.db.repositories.contradiction_audit import ContradictionAuditStore
 from mnemosyne.db.repositories.entity import EntityStore
 from mnemosyne.integration.memory_management_models import (
     DeleteMemoryRequest,
@@ -11,6 +12,8 @@ from mnemosyne.integration.memory_management_models import (
     DeleteUserResponse,
     ExportUserResponse,
     GetMemoryRequest,
+    ListContradictionsRequest,
+    ListContradictionsResponse,
     ListMemoriesRequest,
     ListMemoriesResponse,
     ToggleExtractionRequest,
@@ -31,9 +34,15 @@ class MemoryManagementService:
         toggle_extraction  — per-user switch for background extraction.
     """
 
-    def __init__(self, provider: MemoryProvider, entity_store: EntityStore) -> None:
+    def __init__(
+        self,
+        provider: MemoryProvider,
+        entity_store: EntityStore,
+        audit_store: ContradictionAuditStore | None = None,
+    ) -> None:
         self._provider = provider
         self._entity_store = entity_store
+        self._audit_store = audit_store
         self._extraction_disabled: set[uuid.UUID] = set()
 
     async def list_memories(self, req: ListMemoriesRequest) -> ListMemoriesResponse:
@@ -107,3 +116,28 @@ class MemoryManagementService:
 
     def is_extraction_enabled(self, user_id: uuid.UUID) -> bool:
         return user_id not in self._extraction_disabled
+
+    async def list_contradictions(
+        self, req: ListContradictionsRequest
+    ) -> ListContradictionsResponse:
+        """Return resolved contradictions for ``req.user_id``, newest first.
+
+        When no audit store was wired in at construction time, returns an
+        empty response so callers can introspect the API without crashing.
+        """
+        if self._audit_store is None:
+            return ListContradictionsResponse(
+                user_id=req.user_id, total=0, items=[]
+            )
+        items = await self._audit_store.list_for_user(
+            user_id=req.user_id,
+            limit=req.limit,
+            offset=req.offset,
+            since=req.since,
+        )
+        total = await self._audit_store.count_for_user(
+            req.user_id, since=req.since
+        )
+        return ListContradictionsResponse(
+            user_id=req.user_id, total=total, items=items
+        )

@@ -85,6 +85,8 @@ class InMemoryProvider(MemoryProvider):
         limit: int = 10,
         weights: ScoringWeights | None = None,
         include_invalidated: bool = False,
+        explain: bool = False,
+        source_message_id: uuid.UUID | None = None,
     ) -> list[ScoredMemory]:
         """Return up to *limit* scored memories for *user_id*.
 
@@ -96,8 +98,14 @@ class InMemoryProvider(MemoryProvider):
         3. Sort by (-score, -created_at, memory_id) for determinism.
         4. Slice to limit.
         5. Bump access_count / last_accessed on the returned slice ONLY.
+
+        When ``explain=True`` every returned :class:`ScoredMemory` carries a
+        populated ``score_breakdown_explain`` :class:`ScoreBreakdown`; the
+        legacy ``score_breakdown`` dict remains empty in that mode.
         """
         now = datetime.now(timezone.utc)
+
+        smid = str(source_message_id) if source_message_id is not None else None
 
         candidates: list[Memory] = []
         for m in self._memories.values():
@@ -109,6 +117,10 @@ class InMemoryProvider(MemoryProvider):
                 # Drop hard-invalidated memories (valid_until set and in the past)
                 if m.valid_until is not None and m.valid_until <= now:
                     continue
+            if smid is not None:
+                ids = (m.metadata or {}).get("source_message_ids") or []
+                if smid not in ids:
+                    continue
             candidates.append(m)
 
         if not candidates:
@@ -118,8 +130,16 @@ class InMemoryProvider(MemoryProvider):
         scorer = MultiSignalScorer(weights or ScoringWeights())
         scored: list[ScoredMemory] = []
         for m in candidates:
-            total, breakdown = scorer.score(m, query_embedding, now)
-            scored.append(ScoredMemory(memory=m, score=total, score_breakdown=breakdown))
+            if explain:
+                total, bd = scorer.score(m, query_embedding, now, explain=True)
+                scored.append(
+                    ScoredMemory(memory=m, score=total, score_breakdown_explain=bd)
+                )
+            else:
+                total, breakdown = scorer.score(m, query_embedding, now)
+                scored.append(
+                    ScoredMemory(memory=m, score=total, score_breakdown=breakdown)
+                )
 
         # Deterministic sort: highest score first; among ties newest first,
         # then ascending memory_id for final stability.
