@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timezone
 
+from mnemosyne.db.models.episode import Episode
 from mnemosyne.db.models.history import MemoryHistoryEntry
 from mnemosyne.db.models.memory import Memory, MemoryType, ScoredMemory
 from mnemosyne.errors import MemoryNotFound
 from mnemosyne.providers.base import MemoryProvider
+from mnemosyne.retrieval.fusion import fuse_rrf
 from mnemosyne.retrieval.scoring import MultiSignalScorer, ScoringWeights
 from mnemosyne.utils import content_hash
 
@@ -36,18 +39,19 @@ class InMemoryProvider(MemoryProvider):
         self._memories: dict[uuid.UUID, Memory] = {}
         self._history: list[MemoryHistoryEntry] = []
         self._gdpr_audit: list[dict] = []
+        self._episodes: dict[uuid.UUID, Episode] = {}
 
     # ------------------------------------------------------------------
     # MemoryProvider interface
     # ------------------------------------------------------------------
 
-    async def add(self, memory: Memory) -> uuid.UUID:
+    async def add(self, memory: Memory, actor: str = "agent_tool") -> uuid.UUID:
         """Persist *memory* and return its UUID.
 
         Raises ``ValueError`` if ``memory.embedding`` is ``None``.
         Returns the existing ``memory_id`` without writing a duplicate if
         a non-invalidated memory with the same ``(user_id, content_hash)``
-        already exists.
+        already exists. ``actor`` is recorded on the ``create`` history row.
         """
         if memory.embedding is None:
             raise ValueError("caller must set embedding before add")
@@ -71,12 +75,57 @@ class InMemoryProvider(MemoryProvider):
             operation="create",
             new_content=memory.content,
             new_importance=memory.importance,
-            actor="agent_tool",
+            actor=actor,
         ))
         return memory.memory_id
 
-    async def get_by_id(self, memory_id: uuid.UUID) -> Memory | None:
-        return self._memories.get(memory_id)
+    async def get_by_id(
+        self, memory_id: uuid.UUID, user_id: uuid.UUID | None = None
+    ) -> Memory | None:
+        mem = self._memories.get(memory_id)
+        if mem is None:
+            return None
+        if user_id is not None and mem.user_id != user_id:
+            return None
+        return mem
+
+    async def get_by_ids(self, ids: list[uuid.UUID]) -> list[Memory]:
+        """Batch-fetch active memories for *ids* (parity with Postgres).
+
+        Invalidated and unknown ids are dropped. Order follows first
+        appearance in *ids* for determinism.
+        """
+        if not ids:
+            return []
+        now = datetime.now(timezone.utc)
+        out: list[Memory] = []
+        seen: set[uuid.UUID] = set()
+        for mid in ids:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            mem = self._memories.get(mid)
+            if mem is None:
+                continue
+            if mem.valid_until is not None and mem.valid_until <= now:
+                continue
+            out.append(mem)
+        return out
+
+    async def bump_access(self, ids: list[uuid.UUID]) -> None:
+        """Increment access_count and advance last_accessed for *ids*.
+
+        No history row is written. Unknown ids are ignored.
+        """
+        if not ids:
+            return
+        now = datetime.now(timezone.utc)
+        for mid in set(ids):
+            mem = self._memories.get(mid)
+            if mem is None:
+                continue
+            mem.access_count += 1
+            mem.last_accessed = max(now, mem.last_accessed)
 
     async def search(
         self,
@@ -87,6 +136,9 @@ class InMemoryProvider(MemoryProvider):
         include_invalidated: bool = False,
         explain: bool = False,
         source_message_id: uuid.UUID | None = None,
+        query_text: str | None = None,
+        *,
+        bump_access: bool = True,
     ) -> list[ScoredMemory]:
         """Return up to *limit* scored memories for *user_id*.
 
@@ -102,6 +154,11 @@ class InMemoryProvider(MemoryProvider):
         When ``explain=True`` every returned :class:`ScoredMemory` carries a
         populated ``score_breakdown_explain`` :class:`ScoreBreakdown`; the
         legacy ``score_breakdown`` dict remains empty in that mode.
+
+        When ``query_text`` is supplied a case-insensitive token-overlap list is
+        built as the full-text parity leg and fused with the vector-scored list
+        via Reciprocal Rank Fusion. ``bump_access=False`` suppresses the
+        access-bookkeeping side effect.
         """
         now = datetime.now(timezone.utc)
 
@@ -128,15 +185,20 @@ class InMemoryProvider(MemoryProvider):
 
         # Score — multi-signal: relevance, recency, importance, frequency
         scorer = MultiSignalScorer(weights or ScoringWeights())
+        query_norm = math.sqrt(sum(x * x for x in query_embedding))
         scored: list[ScoredMemory] = []
         for m in candidates:
             if explain:
-                total, bd = scorer.score(m, query_embedding, now, explain=True)
+                total, bd = scorer.score(
+                    m, query_embedding, now, explain=True, query_norm=query_norm
+                )
                 scored.append(
                     ScoredMemory(memory=m, score=total, score_breakdown_explain=bd)
                 )
             else:
-                total, breakdown = scorer.score(m, query_embedding, now)
+                total, breakdown = scorer.score(
+                    m, query_embedding, now, query_norm=query_norm
+                )
                 scored.append(
                     ScoredMemory(memory=m, score=total, score_breakdown=breakdown)
                 )
@@ -150,26 +212,45 @@ class InMemoryProvider(MemoryProvider):
                 str(s.memory.memory_id),
             )
         )
-        result = scored[:limit]
+
+        # Fusion runs in explain mode too, so explain reflects the real ranking.
+        if query_text:
+            fts_ranked = _fts_rank(candidates, query_text)
+            if fts_ranked:
+                fused = fuse_rrf(scored, fts_ranked, max(limit, len(scored)))
+                result = fused[:limit]
+            else:
+                result = scored[:limit]
+        else:
+            result = scored[:limit]
 
         # Side-effect: bump access bookkeeping AFTER scoring and slicing
-        for sm in result:
-            mem = self._memories[sm.memory.memory_id]
-            mem.access_count += 1
-            mem.last_accessed = now
-            # Keep the ScoredMemory's reference consistent with the store
-            sm.memory = mem
+        if bump_access:
+            await self.bump_access([sm.memory.memory_id for sm in result])
+            for sm in result:
+                # Keep the ScoredMemory's reference consistent with the store
+                sm.memory = self._memories[sm.memory.memory_id]
 
         return result
 
-    async def invalidate(self, memory_id: uuid.UUID, reason: str) -> None:
+    async def invalidate(
+        self,
+        memory_id: uuid.UUID,
+        reason: str,
+        user_id: uuid.UUID | None = None,
+        actor: str = "agent_tool",
+    ) -> Memory:
         """Soft-delete *memory_id* by setting valid_until = now(UTC).
 
+        Returns the invalidated memory. When *user_id* is supplied a memory
+        owned by another user raises ``MemoryNotFound``.
+
         Raises ``MemoryNotFound`` if the id is unknown.
-        Records *reason* in ``metadata['invalidation_reason']``.
+        Records *reason* in ``metadata['invalidation_reason']`` and stamps
+        ``actor`` on the ``invalidate`` history row.
         """
         mem = self._memories.get(memory_id)
-        if mem is None:
+        if mem is None or (user_id is not None and mem.user_id != user_id):
             raise MemoryNotFound(memory_id)
         mem.valid_until = datetime.now(timezone.utc)
         mem.metadata["invalidation_reason"] = reason
@@ -177,12 +258,41 @@ class InMemoryProvider(MemoryProvider):
             memory_id=memory_id,
             operation="invalidate",
             old_content=mem.content,
-            actor="agent_tool",
+            actor=actor,
             actor_details={"reason": reason},
         ))
+        return mem
 
-    async def update(self, memory_id: uuid.UUID, **fields) -> Memory:
+    async def add_episode(self, episode: Episode) -> Episode:
+        """Persist *episode*, upserting on ``session_id``."""
+        for existing_id, existing in list(self._episodes.items()):
+            if (
+                existing.user_id == episode.user_id
+                and existing.session_id == episode.session_id
+            ):
+                stored = episode.model_copy(
+                    update={"episode_id": existing.episode_id}
+                )
+                self._episodes[existing_id] = stored
+                return stored
+        self._episodes[episode.episode_id] = episode
+        return episode
+
+    async def list_episodes(
+        self, user_id: uuid.UUID, limit: int = 20, offset: int = 0
+    ) -> list[Episode]:
+        """Return episodes for *user_id* ordered by created_at DESC."""
+        out = [e for e in self._episodes.values() if e.user_id == user_id]
+        out.sort(key=lambda e: e.created_at, reverse=True)
+        return out[offset : offset + limit]
+
+    async def update(
+        self, memory_id: uuid.UUID, *, actor: str = "agent_tool", **fields
+    ) -> Memory:
         """Update mutable fields on *memory_id* and return the updated memory.
+
+        When ``content`` changes the ``content_hash`` is recomputed to match, so
+        dedup stays consistent. ``actor`` is recorded on the history row.
 
         Raises ``MemoryNotFound`` if the id is unknown.
         Raises ``ValueError`` if any read-only field is present in *fields*.
@@ -199,6 +309,8 @@ class InMemoryProvider(MemoryProvider):
         old_importance = mem.importance
         for k, v in fields.items():
             setattr(mem, k, v)
+        if "content" in fields:
+            mem.content_hash = content_hash(mem.content)
         mem.updated_at = datetime.now(timezone.utc)
         self._history.append(MemoryHistoryEntry(
             memory_id=memory_id,
@@ -207,7 +319,7 @@ class InMemoryProvider(MemoryProvider):
             new_content=mem.content,
             old_importance=old_importance,
             new_importance=mem.importance,
-            actor="agent_tool",
+            actor=actor,
         ))
         return mem
 
@@ -218,16 +330,25 @@ class InMemoryProvider(MemoryProvider):
         return entries
 
     async def list_for_user(
-        self, user_id: uuid.UUID, include_invalidated: bool = False
+        self,
+        user_id: uuid.UUID,
+        include_invalidated: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Memory]:
-        """Return every memory for *user_id*, newest first."""
+        """Return memories for *user_id*, newest first.
+
+        ``limit=None`` returns every row; supply ``limit``/``offset`` to page.
+        """
         out = [
             m
             for m in self._memories.values()
             if m.user_id == user_id and (include_invalidated or m.valid_until is None)
         ]
-        out.sort(key=lambda m: m.created_at, reverse=True)
-        return out
+        out.sort(key=lambda m: (m.created_at, m.memory_id), reverse=True)
+        if limit is None:
+            return out[offset:]
+        return out[offset : offset + limit]
 
     async def physical_delete_user(
         self, user_id: uuid.UUID, requestor: str, dry_run: bool = False
@@ -261,7 +382,8 @@ class InMemoryProvider(MemoryProvider):
         deleted_set = set(to_delete)
 
         # Soft-invalidate cross-user reflections that source any deleted memory.
-        # The rows are retained (audit trail); only valid_until + reason are stamped.
+        # The rows are retained (audit trail) but scrubbed of personal data:
+        # content/hash/embedding are cleared so no erased content is retained.
         now = datetime.now(timezone.utc)
         for mem in self._memories.values():
             if mem.user_id == user_id:
@@ -273,6 +395,9 @@ class InMemoryProvider(MemoryProvider):
             if not any(sid in deleted_set for sid in mem.source_memory_ids):
                 continue
             mem.valid_until = now
+            mem.content = ""
+            mem.content_hash = None
+            mem.embedding = None
             mem.metadata["invalidation_reason"] = "gdpr_source_deleted"
 
         for mid in to_delete:
@@ -303,6 +428,42 @@ class InMemoryProvider(MemoryProvider):
                 out.append(mem)
         out.sort(key=lambda m: m.created_at)
         return out
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase alphanumeric token set used by the FTS parity leg."""
+    out: set[str] = set()
+    token: list[str] = []
+    for ch in text.lower():
+        if ch.isalnum():
+            token.append(ch)
+        elif token:
+            out.add("".join(token))
+            token = []
+    if token:
+        out.add("".join(token))
+    return out
+
+
+def _fts_rank(candidates: list[Memory], query_text: str) -> list[ScoredMemory]:
+    """Rank candidates by case-insensitive token overlap with *query_text*.
+
+    Mirrors the Postgres full-text leg: only memories sharing at least one
+    token rank, ordered by overlap count (newest first to break ties).
+    """
+    query_tokens = _tokenize(query_text)
+    if not query_tokens:
+        return []
+    matches: list[tuple[int, Memory]] = []
+    for m in candidates:
+        overlap = len(query_tokens & _tokenize(m.content))
+        if overlap > 0:
+            matches.append((overlap, m))
+    matches.sort(key=lambda t: (-t[0], -t[1].created_at.timestamp(), str(t[1].memory_id)))
+    return [
+        ScoredMemory(memory=m, score=0.0, score_breakdown={"fts_overlap": float(o)})
+        for o, m in matches
+    ]
 
 
 def _version_key(v: str) -> tuple[int, int, int] | None:

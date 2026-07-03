@@ -69,6 +69,9 @@ class MultiSignalScorer:
         query_embedding: list[float],
         now: datetime,
         explain: bool = False,
+        *,
+        relevance: float | None = None,
+        query_norm: float | None = None,
     ) -> tuple[float, dict[str, float]] | tuple[float, ScoreBreakdown]:
         """Return ``(total, breakdown)`` for *memory*.
 
@@ -76,9 +79,20 @@ class MultiSignalScorer:
         legacy ``dict[str, float]`` of raw signal values. When ``explain=True``
         it is a :class:`ScoreBreakdown` carrying the four components, the
         weights used, and both raw and final totals.
+
+        ``relevance`` may be supplied precomputed (e.g. from the DB-side
+        ``embedding <=> query`` cosine distance) to skip the Python cosine
+        recomputation. ``query_norm`` lets the caller precompute the query
+        vector's L2 norm once and reuse it across candidates.
         """
-        # 1. Relevance: cosine similarity between query and stored embedding
-        relevance = self._cosine_sim(query_embedding, memory.embedding or [])
+        # 1. Relevance: cosine similarity between query and stored embedding.
+        #    Clamp to [0, 1] — raw cosine can be negative and the DB leg may
+        #    hand back a value at the boundary.
+        if relevance is None:
+            relevance = self._cosine_sim(
+                query_embedding, memory.embedding or [], query_norm=query_norm
+            )
+        relevance = max(0.0, min(1.0, relevance))
 
         # 2. Recency: exponential decay from last_accessed
         #    Make both datetimes timezone-aware for safe subtraction.
@@ -92,8 +106,9 @@ class MultiSignalScorer:
         # 3. Importance: raw value from memory (clamped to [0, 1] by model)
         importance = memory.importance
 
-        # 4. Frequency: log-scaled access count normalised against cap of 100
-        frequency = math.log1p(memory.access_count) / math.log1p(100)
+        # 4. Frequency: log-scaled access count normalised against cap of 100,
+        #    clamped so counts above the cap cannot exceed 1.0.
+        frequency = min(1.0, math.log1p(memory.access_count) / math.log1p(100))
 
         total = (
             self.weights.relevance * relevance
@@ -127,15 +142,26 @@ class MultiSignalScorer:
         return total, breakdown
 
     @staticmethod
-    def _cosine_sim(a: list[float], b: list[float]) -> float:
+    def _cosine_sim(
+        a: list[float], b: list[float], query_norm: float | None = None
+    ) -> float:
         """Return the cosine similarity between vectors *a* and *b*.
 
-        Returns 0.0 for empty or zero-magnitude vectors.
+        Returns 0.0 for empty or zero-magnitude vectors. Raises ``ValueError``
+        when the two vectors have different lengths — a dimension mismatch is a
+        configuration error, not a similarity worth silently truncating.
+
+        ``query_norm`` may carry the precomputed L2 norm of *a* so a caller
+        scoring many candidates against one query does not recompute it.
         """
         if not a or not b:
             return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
+        if len(a) != len(b):
+            raise ValueError(
+                f"embedding dimension mismatch: {len(a)} vs {len(b)}"
+            )
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
+        norm_a = query_norm if query_norm is not None else math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))
         if norm_a == 0.0 or norm_b == 0.0:
             return 0.0

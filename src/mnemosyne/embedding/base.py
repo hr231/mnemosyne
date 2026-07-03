@@ -26,12 +26,19 @@ class EmbeddingClient(ABC):
         if not provider:
             raise ValueError("Embedding provider not specified in config")
 
+        resilience: dict = {}
+        if config.get("timeout") is not None:
+            resilience["timeout"] = float(config["timeout"])
+        if config.get("max_retries") is not None:
+            resilience["max_retries"] = int(config["max_retries"])
+
         if provider == "openai":
             from mnemosyne.embedding.openai_sdk import OpenAIEmbeddingClient
             return OpenAIEmbeddingClient(
                 model=config.get("model", "text-embedding-3-small"),
                 api_key=config.get("api_key"),
                 dimensions=config.get("dimensions"),
+                **resilience,
             )
 
         if provider == "azure":
@@ -42,6 +49,7 @@ class EmbeddingClient(ABC):
                 dimensions=config.get("dimensions"),
                 azure_endpoint=config["azure_endpoint"],
                 api_version=config.get("api_version"),
+                **resilience,
             )
 
         if provider == "google":
@@ -49,6 +57,8 @@ class EmbeddingClient(ABC):
             return GoogleEmbeddingClient(
                 model=config.get("model", "text-embedding-004"),
                 api_key=config.get("api_key"),
+                dimensions=config.get("dimensions"),
+                **resilience,
             )
 
         if provider == "openai_compatible":
@@ -58,6 +68,7 @@ class EmbeddingClient(ABC):
                 model=config["model"],
                 api_key=config.get("api_key"),
                 dimensions=config.get("dimensions"),
+                **resilience,
             )
 
         if provider == "ollama":
@@ -66,6 +77,7 @@ class EmbeddingClient(ABC):
                 base_url=config.get("base_url", "http://localhost:11434"),
                 model=config.get("model", "nomic-embed-text"),
                 expected_dim=config.get("dimensions"),
+                **resilience,
             )
 
         if provider == "fastembed":
