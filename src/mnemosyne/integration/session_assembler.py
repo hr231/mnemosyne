@@ -4,6 +4,8 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
+from asyncpg.exceptions import UniqueViolationError as _UNIQUE_VIOLATION
+
 from mnemosyne.integration.session_models import ConversationMessage, SessionBatch
 
 
@@ -46,6 +48,24 @@ class SessionAssembler:
             )
 
 
+_INSERT_MESSAGE_SQL = """
+    INSERT INTO memory.session_buffer
+        (session_id, ordinal, message_id, user_id, role, content, sent_at)
+    SELECT $1, COALESCE(MAX(ordinal), -1) + 1, $2, $3, $4, $5, $6
+    FROM memory.session_buffer
+    WHERE session_id = $1
+"""
+
+_SELECT_MESSAGES_SQL = """
+    SELECT message_id, user_id, role, content, sent_at
+    FROM memory.session_buffer
+    WHERE session_id = $1
+    ORDER BY ordinal ASC
+"""
+
+_DELETE_SESSION_SQL = "DELETE FROM memory.session_buffer WHERE session_id = $1"
+
+
 class PersistentSessionAssembler:
     """Postgres-backed assembler. Use when MNEMOSYNE_SESSION_PERSIST=1."""
 
@@ -58,47 +78,34 @@ class PersistentSessionAssembler:
         user_id: uuid.UUID,
         message: ConversationMessage,
     ) -> None:
-        async with self._pool.acquire() as conn:
-            ordinal = await conn.fetchval(
-                """
-                SELECT COALESCE(MAX(ordinal), -1) + 1
-                FROM memory.session_buffer
-                WHERE session_id = $1
-                """,
-                session_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO memory.session_buffer
-                  (session_id, ordinal, message_id, user_id, role, content, sent_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                session_id,
-                ordinal,
-                message.message_id,
-                user_id,
-                message.role,
-                message.content,
-                message.sent_at,
-            )
+        """Append a message using a single ordinal-computing INSERT statement.
 
-    async def flush(self, session_id: uuid.UUID) -> SessionBatch | None:
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT message_id, user_id, role, content, sent_at
-                FROM memory.session_buffer
-                WHERE session_id = $1
-                ORDER BY ordinal ASC
-                """,
-                session_id,
-            )
-            if not rows:
-                return None
-            await conn.execute(
-                "DELETE FROM memory.session_buffer WHERE session_id = $1",
-                session_id,
-            )
+        The ordinal is derived inside the statement via ``COALESCE(MAX(ordinal),
+        -1) + 1`` so no separate read round-trip is needed. Concurrent writers
+        can collide on the ``(session_id, ordinal)`` unique constraint; on a
+        unique violation the insert is retried exactly once (the retry re-reads
+        the now-higher MAX inside the same statement).
+        """
+        args = (
+            session_id,
+            message.message_id,
+            user_id,
+            message.role,
+            message.content,
+            message.sent_at,
+        )
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(_INSERT_MESSAGE_SQL, *args)
+        except _UNIQUE_VIOLATION:
+            async with self._pool.acquire() as conn:
+                await conn.execute(_INSERT_MESSAGE_SQL, *args)
+
+    def _rows_to_batch(
+        self, session_id: uuid.UUID, rows
+    ) -> SessionBatch | None:
+        if not rows:
+            return None
         user_id = rows[0]["user_id"]
         messages = [
             ConversationMessage(
@@ -116,3 +123,28 @@ class PersistentSessionAssembler:
             started_at=messages[0].sent_at,
             closed_at=datetime.now(timezone.utc),
         )
+
+    async def peek(self, session_id: uuid.UUID) -> SessionBatch | None:
+        """Return the assembled batch without deleting the buffered rows.
+
+        Used by the cold path so messages are only removed after the pipeline
+        has successfully processed them (via ``delete_session``).
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_SELECT_MESSAGES_SQL, session_id)
+        return self._rows_to_batch(session_id, rows)
+
+    async def delete_session(self, session_id: uuid.UUID) -> None:
+        """Remove all buffered rows for a session."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(_DELETE_SESSION_SQL, session_id)
+
+    async def flush(self, session_id: uuid.UUID) -> SessionBatch | None:
+        """Read and clear the buffer atomically in a single transaction."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(_SELECT_MESSAGES_SQL, session_id)
+                if not rows:
+                    return None
+                await conn.execute(_DELETE_SESSION_SQL, session_id)
+        return self._rows_to_batch(session_id, rows)

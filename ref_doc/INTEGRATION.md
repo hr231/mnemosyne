@@ -6,33 +6,57 @@ to your AI agent. This guide shows how to wire them into your server.
 ## Prerequisites
 
 ```bash
-pip install "mnemosyne[dev] @ git+https://github.com/hr231/mnemosyne@v0.2.0"
+pip install "mnemosyne @ git+https://github.com/hr231/mnemosyne@v0.3.0"
 ```
 
 ## Setup
 
 ```python
-from mnemosyne import Settings, InMemoryProvider, FakeEmbeddingClient
+import os
+
+from mnemosyne import Settings, PostgresMemoryProvider
+from mnemosyne.embedding.ollama import OllamaEmbeddingClient
 from mnemosyne.pipeline.extraction.orchestrator import ExtractionPipeline
-# For production, use PostgresMemoryProvider and OllamaEmbeddingClient
 
 settings = Settings.from_env()
-provider = InMemoryProvider()  # or: await PostgresMemoryProvider.connect(dsn)
-embedder = FakeEmbeddingClient(dim=768)  # or: OllamaEmbeddingClient(...)
+provider = await PostgresMemoryProvider.connect(os.environ["MNEMOSYNE_PG_DSN"])
+embedder = OllamaEmbeddingClient(
+    base_url=settings.embedding_base_url,
+    model=settings.embedding_model,
+    expected_dim=settings.embedding_dim,
+)
 pipeline = ExtractionPipeline.from_settings(settings, provider, embedder)
 ```
+
+For local development or tests you can swap in the in-process
+`InMemoryProvider` and any `EmbeddingClient` implementation; the touch points
+below are identical.
+
+### Isolation scope
+
+Memories carry `user_id`, `agent_id`, and `org_id`. **Today only `user_id` is
+an enforced isolation boundary** — retrieval and context assembly filter by
+`user_id` alone. `agent_id` and `org_id` are stored as provenance and are not
+yet part of any `WHERE` clause, so they must not be relied on to keep one
+agent's or org's memories from surfacing to another under the same `user_id`.
+The `save_memory` handler accepts host-supplied `agent_id`/`org_id` to stamp
+that provenance, but these are deliberately absent from the tool schema so the
+calling model cannot set them.
 
 ## Touch Point 1: Inject Memory Before LLM Call
 
 Before each LLM call, assemble the user's relevant memories into the
-system prompt.
+system prompt. Use `assemble_context_safe`: it isolates any retrieval failure
+(returns an empty block and records a metric) so a memory outage never breaks
+the host LLM call. The raw `assemble_context` propagates exceptions and is
+intended for tests only.
 
 ```python
-from mnemosyne import assemble_context, build_system_prompt_memory_block
+from mnemosyne import assemble_context_safe, build_system_prompt_memory_block
 
 async def build_prompt(user_id, user_message, embedder, provider):
     query_vec = await embedder.embed(user_message)
-    context = await assemble_context(
+    context = await assemble_context_safe(
         provider=provider,
         user_id=user_id,
         query_embedding=query_vec,

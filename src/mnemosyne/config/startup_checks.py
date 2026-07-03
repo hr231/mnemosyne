@@ -88,6 +88,76 @@ async def check_pg_reachable(dsn: str, timeout_seconds: float = 5.0) -> CheckRes
         return CheckResult(name="pg_reachable", passed=False, message=str(e))
 
 
+async def check_pgvector_column_dim(
+    dsn: str,
+    expected_dim: int,
+    *,
+    schema: str = "memory",
+    table: str = "memories",
+    column: str = "embedding",
+    timeout_seconds: float = 5.0,
+) -> CheckResult:
+    """Verify the live pgvector column dimension matches ``expected_dim``.
+
+    Reads ``atttypmod`` for the target column (pgvector stores the declared
+    vector dimension there directly). A configured ``embedding_dim`` that does
+    not match the deployed column would otherwise pass every other boot check
+    and only fail at the first insert, so this catches a 768-vs-1536 misconfig
+    at startup. An unconstrained ``vector`` column (typmod ``-1``) passes with
+    a warning-style message since the dimension can't be verified.
+    """
+    query = """
+        SELECT a.atttypmod
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1
+          AND c.relname = $2
+          AND a.attname = $3
+          AND NOT a.attisdropped
+    """
+    try:
+        import asyncpg
+
+        conn = await asyncio.wait_for(asyncpg.connect(dsn), timeout=timeout_seconds)
+        try:
+            typmod = await conn.fetchval(query, schema, table, column)
+        finally:
+            await conn.close()
+
+        if typmod is None:
+            return CheckResult(
+                name="pgvector_column_dim",
+                passed=False,
+                message=f"column {schema}.{table}.{column} not found",
+            )
+        if typmod == -1:
+            return CheckResult(
+                name="pgvector_column_dim",
+                passed=True,
+                message=(
+                    f"{schema}.{table}.{column} has no declared dimension; "
+                    f"cannot verify against expected {expected_dim}"
+                ),
+            )
+        if typmod != expected_dim:
+            return CheckResult(
+                name="pgvector_column_dim",
+                passed=False,
+                message=(
+                    f"column {schema}.{table}.{column} is vector({typmod}), "
+                    f"expected vector({expected_dim})"
+                ),
+            )
+        return CheckResult(
+            name="pgvector_column_dim",
+            passed=True,
+            message=f"column dim={typmod}",
+        )
+    except Exception as e:
+        return CheckResult(name="pgvector_column_dim", passed=False, message=str(e))
+
+
 async def check_embedding_dim(embedder: Any, expected_dim: int) -> CheckResult:
     """Embed a probe string and verify vector dimensionality matches expectation."""
     try:
@@ -120,6 +190,32 @@ async def check_llm_reachable(llm: Any, timeout_seconds: float = 10.0) -> CheckR
 
 
 Check = Callable[[], Awaitable[CheckResult]]
+
+
+def default_startup_checks(
+    *,
+    dsn: str,
+    required_env_vars: list[str],
+    embedder: Any,
+    expected_dim: int,
+    llm: Any = None,
+) -> list[Check]:
+    """Assemble the recommended startup-check sequence.
+
+    Runs, in order: required env vars, Postgres reachability + pgvector
+    presence, the live pgvector column dimension, the embedder output
+    dimension, and (when an ``llm`` is supplied) LLM reachability. Pass the
+    result to :func:`run_startup_checks` or ``bootstrap_memory_subsystem``.
+    """
+    checks: list[Check] = [
+        lambda: check_env_vars(required_env_vars),
+        lambda: check_pg_reachable(dsn),
+        lambda: check_pgvector_column_dim(dsn, expected_dim),
+        lambda: check_embedding_dim(embedder, expected_dim),
+    ]
+    if llm is not None:
+        checks.append(lambda: check_llm_reachable(llm))
+    return checks
 
 
 async def run_startup_checks(
