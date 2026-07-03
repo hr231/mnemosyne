@@ -8,7 +8,7 @@ import pytest
 from mnemosyne.db.models.memory import Memory, MemoryType
 from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from tests.fixtures.fake_llm import FakeLLMClient
-from mnemosyne.providers.in_memory import InMemoryProvider
+from tests.unit.pipeline.conftest import build_in_memory_provider
 from mnemosyne.pipeline.reflection import (
     generate_reflections,
     should_generate_reflection,
@@ -18,7 +18,7 @@ from mnemosyne.pipeline.reflection import (
 
 @pytest.fixture
 def provider():
-    return InMemoryProvider()
+    return build_in_memory_provider()
 
 
 @pytest.fixture
@@ -45,6 +45,33 @@ async def _seed_memories(provider, embedder, user_id, count=20, importance=0.8):
             embedding=emb,
         )
         await provider.add(mem)
+
+
+class TestReflectionNoAccessBump:
+    async def test_trigger_check_does_not_bump_access_count(self, provider, embedder):
+        user_id = uuid.uuid4()
+        await _seed_memories(provider, embedder, user_id, count=5, importance=0.5)
+        before = {mid: m.access_count for mid, m in provider._memories.items()}
+
+        await should_generate_reflection(provider, user_id)
+
+        after = {mid: m.access_count for mid, m in provider._memories.items()}
+        assert before == after, "trigger check must not bump access_count"
+
+    async def test_trigger_check_does_not_call_search(self, provider, embedder):
+        user_id = uuid.uuid4()
+        await _seed_memories(provider, embedder, user_id, count=5, importance=0.5)
+
+        calls = {"n": 0}
+        original_search = provider.search
+
+        async def tracking_search(*args, **kwargs):
+            calls["n"] += 1
+            return await original_search(*args, **kwargs)
+
+        provider.search = tracking_search
+        await should_generate_reflection(provider, user_id)
+        assert calls["n"] == 0, "reflection trigger must use list_for_user, not search"
 
 
 class TestShouldGenerateReflection:
@@ -185,6 +212,47 @@ class TestMaybeRunReflection:
         count = await maybe_run_reflection(provider, llm, embedder, user_id)
         assert count == 0
         assert llm.calls == 0, "LLM must NOT be called when the trigger does not fire"
+
+    async def test_watermark_fires_at_most_once_without_new_memories(
+        self, provider, embedder, monkeypatch
+    ):
+        """With a pool, two consecutive ticks and no new memories must fire
+        reflection only once — the watermark suppresses the second."""
+        from mnemosyne.pipeline import reflection as refl
+        from mnemosyne.pipeline.reflection import maybe_run_reflection
+
+        store: dict[uuid.UUID, object] = {}
+
+        async def fake_get(pool, user_id):
+            return store.get(user_id)
+
+        async def fake_set(pool, user_id, ts):
+            store[user_id] = ts
+
+        monkeypatch.setattr(refl, "get_last_reflected_at", fake_get)
+        monkeypatch.setattr(refl, "set_last_reflected_at", fake_set)
+
+        class InsightLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def complete(self, prompt, **kwargs):
+                self.calls += 1
+                return json.dumps(["User values comfort"])
+
+        user_id = uuid.uuid4()
+        await _seed_memories(provider, embedder, user_id, count=20, importance=0.8)
+
+        llm = InsightLLM()
+        pool = object()  # truthy sentinel — repo functions are monkeypatched
+        first = await maybe_run_reflection(provider, llm, embedder, user_id, pool=pool)
+        second = await maybe_run_reflection(provider, llm, embedder, user_id, pool=pool)
+
+        assert first >= 1
+        assert second == 0
+        assert llm.calls == 1
+        assert user_id in store  # watermark was written on the first run
 
     async def test_depth_cap_blocks_trigger(self, provider, embedder):
         from mnemosyne.pipeline.reflection import maybe_run_reflection

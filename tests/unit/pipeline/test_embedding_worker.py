@@ -8,7 +8,7 @@ import pytest
 from mnemosyne.db.models.memory import Memory
 from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.embedding import embed_memory_ids, embed_pending_memories
-from mnemosyne.providers.in_memory import InMemoryProvider
+from tests.unit.pipeline.conftest import build_in_memory_provider
 
 
 @pytest.fixture
@@ -17,11 +17,11 @@ def embedder() -> FakeEmbeddingClient:
 
 
 @pytest.fixture
-def provider() -> InMemoryProvider:
-    return InMemoryProvider()
+def provider():
+    return build_in_memory_provider()
 
 
-async def _add_memory(provider: InMemoryProvider, embedder: FakeEmbeddingClient, content: str, user_id: uuid.UUID) -> uuid.UUID:
+async def _add_memory(provider, embedder: FakeEmbeddingClient, content: str, user_id: uuid.UUID) -> uuid.UUID:
     """Helper: embed and add a memory, return its ID."""
     embedding = await embedder.embed(content)
     mem = Memory(user_id=user_id, content=content, embedding=embedding)
@@ -90,6 +90,55 @@ class TestEmbedPendingMemories:
         # batch_size=2 should still embed all 5 in multiple iterations
         count = await embed_pending_memories(provider, embedder, batch_size=2)
         assert count == 5
+
+    @pytest.mark.asyncio
+    async def test_user_id_filter_only_embeds_that_user(self, provider, embedder):
+        user_a = uuid.uuid4()
+        user_b = uuid.uuid4()
+        for user_id, tag in ((user_a, "a"), (user_b, "b")):
+            mem = Memory(user_id=user_id, content=f"item {tag}", embedding=None)
+            mem = mem.model_copy(update={"content_hash": f"h{tag}"})
+            provider._memories[mem.memory_id] = mem
+
+        count = await embed_pending_memories(provider, embedder, user_id=user_a)
+
+        assert count == 1
+        unembedded = [
+            m for m in provider._memories.values() if m.embedding is None
+        ]
+        assert len(unembedded) == 1
+        assert unembedded[0].user_id == user_b
+
+    @pytest.mark.asyncio
+    async def test_dim_mismatch_raises(self, provider):
+        class WrongDimEmbedder(FakeEmbeddingClient):
+            async def embed_batch(self, texts):
+                return [[0.0] * 5 for _ in texts]
+
+        user_id = uuid.uuid4()
+        mem = Memory(user_id=user_id, content="x", embedding=None)
+        mem = mem.model_copy(update={"content_hash": "hx"})
+        provider._memories[mem.memory_id] = mem
+
+        with pytest.raises(ValueError, match="dimension"):
+            await embed_pending_memories(
+                provider, WrongDimEmbedder(dim=768), expected_dim=768
+            )
+
+    @pytest.mark.asyncio
+    async def test_length_mismatch_raises(self, provider):
+        class ShortBatchEmbedder(FakeEmbeddingClient):
+            async def embed_batch(self, texts):
+                return [await self.embed(texts[0])]  # returns fewer than requested
+
+        user_id = uuid.uuid4()
+        for i in range(2):
+            mem = Memory(user_id=user_id, content=f"c{i}", embedding=None)
+            mem = mem.model_copy(update={"content_hash": f"h{i}"})
+            provider._memories[mem.memory_id] = mem
+
+        with pytest.raises(ValueError):
+            await embed_pending_memories(provider, ShortBatchEmbedder(dim=768))
 
 
 # ---------------------------------------------------------------------------

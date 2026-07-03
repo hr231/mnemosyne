@@ -2,21 +2,20 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 
 import pytest
 
 from mnemosyne.config.settings import Settings
 from mnemosyne.db.models.memory import ExtractionResult, MemoryType
-from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from mnemosyne.pipeline.runner import SessionProcessingResult, process_session
-from mnemosyne.providers.in_memory import InMemoryProvider
 from mnemosyne.rules.stub import StubRegexExtractor
+from tests.fixtures.fake_embedding import FakeEmbeddingClient
+from tests.unit.pipeline.conftest import build_in_memory_provider
 
 
 @pytest.fixture
-def provider() -> InMemoryProvider:
-    return InMemoryProvider()
+def provider():
+    return build_in_memory_provider()
 
 
 @pytest.fixture
@@ -48,12 +47,9 @@ class TestProcessSession:
 
     @pytest.mark.asyncio
     async def test_extraction_from_text(self, provider, embedder, settings):
-        session_id = uuid.uuid4()
-        user_id = uuid.uuid4()
-
         result = await process_session(
-            session_id=session_id,
-            user_id=user_id,
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             provider=provider,
             embedder=embedder,
             settings=settings,
@@ -65,9 +61,6 @@ class TestProcessSession:
 
     @pytest.mark.asyncio
     async def test_extraction_from_pre_extracted_results(self, provider, embedder, settings):
-        session_id = uuid.uuid4()
-        user_id = uuid.uuid4()
-
         pre_extracted = [
             ExtractionResult(
                 content="Budget: $300",
@@ -84,8 +77,8 @@ class TestProcessSession:
         ]
 
         result = await process_session(
-            session_id=session_id,
-            user_id=user_id,
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             provider=provider,
             embedder=embedder,
             settings=settings,
@@ -95,22 +88,41 @@ class TestProcessSession:
         assert result.memories_created == 2
 
     @pytest.mark.asyncio
-    async def test_episode_always_created(self, provider, embedder, settings):
+    async def test_episode_always_persisted(self, provider, embedder, settings):
+        user_id = uuid.uuid4()
+        session_id = uuid.uuid4()
         result = await process_session(
-            session_id=uuid.uuid4(),
-            user_id=uuid.uuid4(),
+            session_id=session_id,
+            user_id=user_id,
             provider=provider,
             embedder=embedder,
             settings=settings,
         )
 
         assert result.episode_created is True
+        episodes = await provider.list_episodes(user_id)
+        assert any(e.session_id == session_id for e in episodes)
+
+    @pytest.mark.asyncio
+    async def test_episode_upserts_on_rerun(self, provider, embedder, settings):
+        user_id = uuid.uuid4()
+        session_id = uuid.uuid4()
+        for _ in range(2):
+            await process_session(
+                session_id=session_id,
+                user_id=user_id,
+                provider=provider,
+                embedder=embedder,
+                settings=settings,
+            )
+
+        episodes = await provider.list_episodes(user_id)
+        same_session = [e for e in episodes if e.session_id == session_id]
+        assert len(same_session) == 1
 
     @pytest.mark.asyncio
     async def test_memories_searchable_after_processing(self, provider, embedder, settings):
         user_id = uuid.uuid4()
-        session_id = uuid.uuid4()
-
         pre_extracted = [
             ExtractionResult(
                 content="Budget: $300",
@@ -121,7 +133,7 @@ class TestProcessSession:
         ]
 
         await process_session(
-            session_id=session_id,
+            session_id=uuid.uuid4(),
             user_id=user_id,
             provider=provider,
             embedder=embedder,
@@ -134,7 +146,7 @@ class TestProcessSession:
         assert len(results) >= 1
 
     @pytest.mark.asyncio
-    async def test_stats_includes_all_stage_keys(self, provider, embedder, settings):
+    async def test_result_has_expected_fields(self, provider, embedder, settings):
         result = await process_session(
             session_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
@@ -146,21 +158,69 @@ class TestProcessSession:
         assert hasattr(result, "memories_created")
         assert hasattr(result, "embedded")
         assert hasattr(result, "episode_created")
-        assert hasattr(result, "deduped")
-        assert hasattr(result, "decay_stats")
+        assert hasattr(result, "contradictions_resolved")
 
     @pytest.mark.asyncio
-    async def test_decay_stats_structure(self, provider, embedder, settings):
-        result = await process_session(
-            session_id=uuid.uuid4(),
-            user_id=uuid.uuid4(),
-            provider=provider,
-            embedder=embedder,
-            settings=settings,
-        )
+    async def test_no_per_session_decay_or_dedup(self, provider, embedder, settings):
+        """process_session must not run decay or dedup — those are maintenance only."""
+        from unittest.mock import patch
 
-        assert "decayed" in result.decay_stats
-        assert "archived" in result.decay_stats
+        with patch("mnemosyne.pipeline.runner.apply_decay") as decay, patch(
+            "mnemosyne.pipeline.runner.run_dedup"
+        ) as dedup:
+            await process_session(
+                session_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
+                provider=provider,
+                embedder=embedder,
+                settings=settings,
+            )
+        decay.assert_not_called()
+        dedup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_contradiction_check_runs_when_llm_present(self, provider, embedder, settings):
+        from unittest.mock import AsyncMock, patch
+
+        from tests.fixtures.fake_llm import FakeLLMClient
+
+        with patch(
+            "mnemosyne.pipeline.runner.run_contradiction_check",
+            new=AsyncMock(return_value=0),
+        ) as check:
+            await process_session(
+                session_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
+                provider=provider,
+                embedder=embedder,
+                settings=settings,
+                extraction_results=[
+                    ExtractionResult(content="a fact", importance=0.5, rule_id="r")
+                ],
+                llm_client=FakeLLMClient(),
+            )
+        check.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_contradiction_check_skipped_without_llm(self, provider, embedder, settings):
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "mnemosyne.pipeline.runner.run_contradiction_check",
+            new=AsyncMock(return_value=0),
+        ) as check:
+            await process_session(
+                session_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
+                provider=provider,
+                embedder=embedder,
+                settings=settings,
+                extraction_results=[
+                    ExtractionResult(content="a fact", importance=0.5, rule_id="r")
+                ],
+                llm_client=None,
+            )
+        check.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_idempotent_no_explosion_on_repeat(self, provider, embedder, settings):
@@ -175,9 +235,7 @@ class TestProcessSession:
             )
         ]
 
-        # Run twice — should not raise and should not double the memories
-        # (content-hash dedup in add() prevents duplication)
-        r1 = await process_session(
+        await process_session(
             session_id=session_id,
             user_id=user_id,
             provider=provider,
@@ -185,7 +243,7 @@ class TestProcessSession:
             settings=settings,
             extraction_results=pre_extracted,
         )
-        r2 = await process_session(
+        await process_session(
             session_id=session_id,
             user_id=user_id,
             provider=provider,

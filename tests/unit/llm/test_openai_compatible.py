@@ -41,8 +41,8 @@ def _mock_httpx_post(response_content: str):
 # ---------------------------------------------------------------------------
 
 def test_extraction_prompt_format():
-    """EXTRACTION_PROMPT must contain a {text} placeholder."""
-    assert "{text}" in EXTRACTION_PROMPT
+    """EXTRACTION_PROMPT must contain a $input placeholder for the untrusted block."""
+    assert "$input" in EXTRACTION_PROMPT
 
 
 @pytest.mark.asyncio
