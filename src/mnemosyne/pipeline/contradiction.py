@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from mnemosyne.db.models.memory import Memory, MemoryType
 from mnemosyne.db.repositories.contradiction_audit import ContradictionAuditStore
 from mnemosyne.embedding.base import EmbeddingClient
 from mnemosyne.llm.base import LLMClient
+from mnemosyne.llm.hardening import render_with_untrusted
 from mnemosyne.providers.base import MemoryProvider
 from mnemosyne.retrieval.scoring import MultiSignalScorer
 
@@ -28,9 +30,14 @@ CONTRADICTION_SIMILARITY_MAX: float = 0.89
 NLI_CONTRADICTION_HIGH: float = 0.7
 NLI_CONTRADICTION_LOW: float = 0.4
 
+# Upper bound on how many memories seed a single contradiction scan. Seeds are
+# taken highest-importance first, so the cap sheds only low-signal memories.
+CONTRADICTION_SCAN_LIMIT: int = 200
+
 ADJUDICATION_PROMPT = """\
-Memory A (older): {old_content}
-Memory B (newer): {new_content}
+Compare the two memories about the same user given below.
+
+$input
 
 Do these memories contradict each other? If so, which is more likely current?
 
@@ -76,6 +83,7 @@ async def detect_contradictions(
         new_memory.embedding,
         user_id=new_memory.user_id,
         limit=20,
+        bump_access=False,
     )
 
     candidates: list[tuple[Memory, float]] = []
@@ -97,10 +105,20 @@ async def detect_contradictions(
         if use_nli:
             try:
                 from mnemosyne.pipeline.nli import predict_nli
-                nli_result = predict_nli(new_memory.content, existing.content)
+
+                # predict_nli is synchronous and CPU-bound (torch); run it off
+                # the event loop so it cannot block other pipeline coroutines.
+                nli_result = await asyncio.to_thread(
+                    predict_nli, new_memory.content, existing.content
+                )
                 contradiction_score = nli_result.contradiction
-            except ImportError:
-                pass  # torch/transformers not installed; fall back to similarity
+            except Exception as exc:  # noqa: BLE001
+                # Any NLI failure (missing torch/transformers, model download or
+                # inference error) degrades gracefully to the cosine proxy rather
+                # than aborting contradiction detection.
+                logger.debug(
+                    "NLI unavailable, falling back to cosine similarity: %s", exc
+                )
 
         if contradiction_score >= NLI_CONTRADICTION_LOW:
             candidates.append((existing, contradiction_score))
@@ -181,10 +199,11 @@ async def resolve_contradiction(
     never block the resolution. A structured INFO log line is emitted on every
     resolution, regardless of audit-store success.
     """
-    prompt = ADJUDICATION_PROMPT.format(
-        old_content=old_memory.content,
-        new_content=new_memory.content,
+    adjudication_block = (
+        f"Memory A (older): {old_memory.content}\n"
+        f"Memory B (newer): {new_memory.content}"
     )
+    prompt = render_with_untrusted(ADJUDICATION_PROMPT, adjudication_block)
 
     raw_response: str | None = None
     try:
@@ -271,14 +290,16 @@ async def run_contradiction_check(
 
     Returns the count of contradiction pairs resolved.
     """
-    dummy_vec = await embedder.embed("contradiction check")
-    hits = await provider.search(dummy_vec, user_id=user_id, limit=50)
+    # Enumerate the user's memories without scoring side-effects, then prefer
+    # the highest-importance ones as scan seeds rather than an arbitrary
+    # recency slice — important memories are the ones worth reconciling first.
+    memories = await provider.list_for_user(user_id)
+    memories = sorted(memories, key=lambda m: m.importance, reverse=True)
 
     resolved = 0
     checked_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
 
-    for h in hits:
-        mem = h.memory
+    for mem in memories[:CONTRADICTION_SCAN_LIMIT]:
         if created_after is not None:
             mem_created = mem.created_at
             if mem_created.tzinfo is None:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 _MODEL = None
 _TOKENIZER = None
+_MODEL_LOCK = threading.Lock()
 
 
 @dataclass
@@ -17,26 +19,39 @@ class NLIResult:
 
 
 def _load_nli_model():
-    """Lazy-load the DeBERTa NLI model. Raises ImportError if torch/transformers not installed."""
+    """Lazy-load the DeBERTa NLI model. Raises ImportError if torch/transformers not installed.
+
+    The load is guarded by a lock with double-checked initialisation so
+    concurrent callers (predict_nli runs under ``asyncio.to_thread`` on the
+    default thread-pool) cannot race two model downloads/instantiations.
+    """
     global _MODEL, _TOKENIZER
     if _MODEL is not None:
         return _MODEL, _TOKENIZER
 
-    try:
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    except ImportError as exc:
-        raise ImportError(
-            "Contradiction detection requires torch + transformers. "
-            "Install: pip install torch --index-url https://download.pytorch.org/whl/cpu && "
-            "pip install transformers sentencepiece"
-        ) from exc
+    with _MODEL_LOCK:
+        if _MODEL is not None:
+            return _MODEL, _TOKENIZER
 
-    model_name = "cross-encoder/nli-deberta-v3-base"
-    _TOKENIZER = AutoTokenizer.from_pretrained(model_name)
-    _MODEL = AutoModelForSequenceClassification.from_pretrained(model_name)
-    _MODEL.eval()
-    logger.info("NLI model loaded: %s", model_name)
+        try:
+            import torch  # noqa: F401
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        except ImportError as exc:
+            raise ImportError(
+                "Contradiction detection requires torch + transformers. "
+                "Install: pip install torch --index-url https://download.pytorch.org/whl/cpu && "
+                "pip install transformers sentencepiece"
+            ) from exc
+
+        model_name = "cross-encoder/nli-deberta-v3-base"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        model.eval()
+        # Publish the tokenizer first, then the model — callers gate on _MODEL,
+        # so it must be assigned last to avoid exposing a half-initialised pair.
+        _TOKENIZER = tokenizer
+        _MODEL = model
+        logger.info("NLI model loaded: %s", model_name)
     return _MODEL, _TOKENIZER
 
 

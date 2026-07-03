@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from mnemosyne.db.models.episode import Episode
 from mnemosyne.embedding.base import EmbeddingClient
 from mnemosyne.llm.base import LLMClient
+from mnemosyne.llm.hardening import render_with_untrusted
 from mnemosyne.providers.base import MemoryProvider
 
 logger = logging.getLogger(__name__)
@@ -93,13 +94,20 @@ async def create_episode(
     return episode
 
 
+_EPISODE_SUMMARY_TEMPLATE = (
+    "You are summarising a user session for a memory system.\n"
+    "Given the following memories extracted from the session, write a single "
+    "concise sentence (max 50 words) that captures the key information.\n\n"
+    "Memories:\n$input\n\n"
+    "Summary:"
+)
+
+
 def _build_episode_summary_prompt(memory_contents: list[str]) -> str:
-    """Build the LLM prompt for generating a memory-specific episode summary."""
+    """Build the LLM prompt for generating a memory-specific episode summary.
+
+    Memory contents are user-derived; they are wrapped as untrusted data so a
+    stored memory cannot inject instructions into the summariser.
+    """
     items = "\n".join(f"- {c}" for c in memory_contents)
-    return (
-        "You are summarising a user session for a memory system.\n"
-        "Given the following memories extracted from the session, write a single "
-        "concise sentence (max 50 words) that captures the key information.\n\n"
-        f"Memories:\n{items}\n\n"
-        "Summary:"
-    )
+    return render_with_untrusted(_EPISODE_SUMMARY_TEMPLATE, items)

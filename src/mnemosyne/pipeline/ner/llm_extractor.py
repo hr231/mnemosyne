@@ -4,6 +4,7 @@ import json
 import logging
 
 from mnemosyne.llm.base import LLMClient
+from mnemosyne.llm.hardening import render_with_untrusted
 from mnemosyne.pipeline.ner.spacy_extractor import RawEntity
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ Return a JSON array of objects, each with:
 - "type": one of "person", "organization", "product", "brand", "location", "concept"
 - "context": the sentence containing the entity
 
-Text: {text}
+Text: $input
 
 Respond with ONLY valid JSON array."""
 
@@ -22,7 +23,7 @@ Respond with ONLY valid JSON array."""
 async def extract_entities_llm(text: str, llm_client: LLMClient) -> list[RawEntity]:
     """Extract entities using LLM as fallback."""
     try:
-        prompt = ENTITY_PROMPT.format(text=text)
+        prompt = render_with_untrusted(ENTITY_PROMPT, text)
         raw = await llm_client.complete(prompt)
 
         cleaned = raw.strip()

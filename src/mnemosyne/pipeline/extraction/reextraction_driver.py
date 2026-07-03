@@ -7,6 +7,7 @@ and emits KEEP / SUPERSEDE / NEW decisions. Optionally records progress in
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -81,19 +82,30 @@ class ReextractionDriver:
     embedder: EmbeddingClient
     batch_size: int = 25
     pg_pool: object | None = None
+    inter_batch_pause_s: float = 0.0
     _rng: object = field(default=None, repr=False)
 
     async def reextract_user(
-        self, user_id: uuid.UUID, target_version: str
+        self,
+        user_id: uuid.UUID,
+        target_version: str,
+        dry_run: bool = False,
     ) -> ReextractionResult:
         """Re-extract every memory for *user_id* below *target_version*.
 
         The operation is idempotent: once every memory has been advanced
         to *target_version*, subsequent calls are no-ops (``count_processed=0``).
+
+        When *dry_run* is set no writes are performed — no version stamping,
+        invalidation, persistence, or job rows — but the decision counts are
+        still computed so the caller can preview the effect. Between batches the
+        driver pauses for ``inter_batch_pause_s`` seconds (0 disables) to keep a
+        large backfill from monopolising the LLM/embedding budget.
         """
         started = datetime.now(timezone.utc)
         job_id = uuid.uuid4()
-        await self._insert_job_row(job_id, user_id, target_version, started)
+        if not dry_run:
+            await self._insert_job_row(job_id, user_id, target_version, started)
         error: str | None = None
         result: ReextractionResult | None = None
 
@@ -104,13 +116,16 @@ class ReextractionDriver:
             count_kept = count_superseded = count_new = 0
 
             for batch_start in range(0, len(stale), self.batch_size):
+                if batch_start and self.inter_batch_pause_s > 0:
+                    await asyncio.sleep(self.inter_batch_pause_s)
                 batch = stale[batch_start : batch_start + self.batch_size]
                 for old in batch:
                     candidates = await self.pipeline.extract_only(text=old.content)
                     if not candidates:
                         # Nothing new — the old memory still represents the
                         # current best distillation. Advance its version.
-                        await self._stamp_version(old, target_version)
+                        if not dry_run:
+                            await self._stamp_version(old, target_version)
                         count_kept += 1
                         continue
 
@@ -121,28 +136,31 @@ class ReextractionDriver:
                     decision = decide_for_pair(old, new_candidate)
 
                     if decision.kind is DecisionKind.KEEP:
-                        await self._stamp_version(old, target_version)
+                        if not dry_run:
+                            await self._stamp_version(old, target_version)
                         count_kept += 1
                     elif decision.kind is DecisionKind.SUPERSEDE:
-                        await self.provider.invalidate(
-                            memory_id=old.memory_id,
-                            reason=f"superseded by re-extraction to {target_version}",
-                        )
-                        await self._persist_new(
-                            user_id=user_id,
-                            candidate=new_candidate,
-                            target_version=target_version,
-                        )
+                        if not dry_run:
+                            await self.provider.invalidate(
+                                memory_id=old.memory_id,
+                                reason=f"superseded by re-extraction to {target_version}",
+                            )
+                            await self._persist_new(
+                                user_id=user_id,
+                                candidate=new_candidate,
+                                target_version=target_version,
+                            )
                         count_superseded += 1
                     else:
-                        await self._persist_new(
-                            user_id=user_id,
-                            candidate=new_candidate,
-                            target_version=target_version,
-                        )
-                        # The old memory still stands — advance its version too
-                        # so the loop is idempotent.
-                        await self._stamp_version(old, target_version)
+                        if not dry_run:
+                            await self._persist_new(
+                                user_id=user_id,
+                                candidate=new_candidate,
+                                target_version=target_version,
+                            )
+                            # The old memory still stands — advance its version
+                            # too so the loop is idempotent.
+                            await self._stamp_version(old, target_version)
                         count_new += 1
 
             finished = datetime.now(timezone.utc)
@@ -165,14 +183,15 @@ class ReextractionDriver:
             )
             raise
         finally:
-            finished_at = datetime.now(timezone.utc)
-            await self._complete_job_row(
-                job_id=job_id,
-                count_processed=result.count_processed if result else 0,
-                count_changed=result.count_changed if result else 0,
-                error=error,
-                finished=finished_at,
-            )
+            if not dry_run:
+                finished_at = datetime.now(timezone.utc)
+                await self._complete_job_row(
+                    job_id=job_id,
+                    count_processed=result.count_processed if result else 0,
+                    count_changed=result.count_changed if result else 0,
+                    error=error,
+                    finished=finished_at,
+                )
 
     async def _stamp_version(self, old: Memory, target_version: str) -> None:
         """Advance the extraction_version of *old* to *target_version*.

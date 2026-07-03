@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import logging
 
-from mnemosyne.db.models.memory import ExtractionResult, MemoryType
+from mnemosyne.db.models.memory import ExtractionResult
 from mnemosyne.errors import MalformedLLMResponse
-from mnemosyne.llm.base import LLMClient
+from mnemosyne.llm.base import LLMClient, llm_semaphore, record_llm_usage
+from mnemosyne.llm.hardening import (
+    clamp_importance,
+    render_with_untrusted,
+    safe_memory_type,
+)
+from mnemosyne.utils import retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +21,7 @@ Return a JSON array of objects, each with:
 - "memory_type": one of "fact", "preference", "entity", "procedural"
 - "importance": float 0.0-1.0
 
-Text: {text}
+Text: $input
 
 Respond with ONLY valid JSON array."""
 
@@ -32,12 +38,16 @@ class OpenAILLMClient(LLMClient):
         api_key: str | None = None,
         azure_endpoint: str | None = None,
         api_version: str | None = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
         **kwargs,
     ):
         self._model = model
         self._api_key = api_key
         self._azure_endpoint = azure_endpoint
         self._api_version = api_version
+        self._timeout = timeout
+        self._max_retries = max_retries
         self._kwargs = kwargs
         self._client = None
 
@@ -56,28 +66,66 @@ class OpenAILLMClient(LLMClient):
                 azure_endpoint=self._azure_endpoint,
                 api_version=self._api_version or "2024-02-01",
                 api_key=self._api_key,
+                timeout=self._timeout,
             )
         else:
-            self._client = openai.AsyncOpenAI(api_key=self._api_key)
+            self._client = openai.AsyncOpenAI(
+                api_key=self._api_key, timeout=self._timeout
+            )
         return self._client
 
     async def complete(self, prompt: str, **kwargs) -> str:
         client = self._get_client()
-        response = await client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-            **kwargs,
-        )
-        return response.choices[0].message.content or ""
+        usage: dict[str, int | None] = {"tokens": None}
+
+        async def _do() -> str:
+            response = await client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                **kwargs,
+            )
+            usage["tokens"] = _extract_total_tokens(response)
+            return response.choices[0].message.content or ""
+
+        async with llm_semaphore():
+            text = await retry_async(
+                _do, max_retries=self._max_retries, retry_on=_retryable_exceptions()
+            )
+        record_llm_usage(usage["tokens"])
+        return text
 
     async def extract_memories(self, text: str) -> list[ExtractionResult]:
-        prompt = EXTRACTION_PROMPT.format(text=text)
+        prompt = render_with_untrusted(EXTRACTION_PROMPT, text)
         raw = await self.complete(prompt)
         return _parse_extraction_response(raw)
 
 
+def _extract_total_tokens(response: object) -> int | None:
+    """Best-effort read of total token usage from an OpenAI-style response."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    total = getattr(usage, "total_tokens", None)
+    return int(total) if total is not None else None
+
+
+def _retryable_exceptions() -> tuple[type[Exception], ...]:
+    """Best-effort tuple of SDK transient errors plus generic fallbacks."""
+    exceptions: list[type[Exception]] = [TimeoutError, ConnectionError]
+    try:
+        import openai
+
+        for name in ("APITimeoutError", "APIConnectionError", "RateLimitError", "InternalServerError"):
+            exc = getattr(openai, name, None)
+            if isinstance(exc, type):
+                exceptions.append(exc)
+    except ImportError:
+        pass
+    return tuple(exceptions)
+
+
 def _parse_extraction_response(raw: str) -> list[ExtractionResult]:
-    """Parse LLM extraction response into ExtractionResult list."""
+    """Parse and validate an LLM extraction response into ExtractionResults."""
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.split("\n") if not l.strip().startswith("```")]
@@ -95,10 +143,12 @@ def _parse_extraction_response(raw: str) -> list[ExtractionResult]:
     for item in items:
         if not isinstance(item, dict) or "content" not in item:
             continue
-        results.append(ExtractionResult(
-            content=item["content"],
-            memory_type=MemoryType(item.get("memory_type", "fact")),
-            importance=float(item.get("importance", 0.5)),
-            rule_id="llm_extractor",
-        ))
+        results.append(
+            ExtractionResult(
+                content=item["content"],
+                memory_type=safe_memory_type(item.get("memory_type")),
+                importance=clamp_importance(item.get("importance", 0.5)),
+                rule_id="llm_extractor",
+            )
+        )
     return results

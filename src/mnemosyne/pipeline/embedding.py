@@ -9,15 +9,37 @@ from mnemosyne.providers.base import MemoryProvider
 logger = logging.getLogger(__name__)
 
 
+def _validate_batch(
+    rows: list,
+    embeddings: list[list[float]],
+    expected_dim: int | None,
+) -> None:
+    """Ensure embeddings line up 1:1 with rows and match the expected dimension."""
+    if len(embeddings) != len(rows):
+        raise ValueError(
+            f"embed_batch returned {len(embeddings)} vectors for {len(rows)} inputs"
+        )
+    if expected_dim is not None:
+        for vec in embeddings:
+            if len(vec) != expected_dim:
+                raise ValueError(
+                    f"embedding dimension {len(vec)} != expected {expected_dim}"
+                )
+
+
 async def embed_pending_memories(
     provider: MemoryProvider,
     embedder: EmbeddingClient,
     batch_size: int = 100,
+    user_id: uuid.UUID | None = None,
+    expected_dim: int | None = None,
 ) -> int:
     """Embed memories that have NULL embeddings.
 
     Scans the provider for memories without embeddings, embeds them in
-    batches, and updates each memory in-place.
+    batches, and updates each memory in-place. When *user_id* is given only
+    that user's pending memories are embedded. *expected_dim* enables a
+    response-dimension check.
 
     Works with both ``InMemoryProvider`` (via ``_memories`` dict) and
     ``PostgresMemoryProvider`` (via raw asyncpg connection pool ``_pool``).
@@ -27,10 +49,10 @@ async def embed_pending_memories(
     total = 0
 
     if hasattr(provider, "_memories"):
-        # InMemoryProvider: iterate the in-process dict
         unembedded = [
-            m for m in provider._memories.values()
-            if m.embedding is None
+            m
+            for m in provider._memories.values()  # type: ignore[attr-defined]
+            if m.embedding is None and (user_id is None or m.user_id == user_id)
         ]
         for i in range(0, len(unembedded), batch_size):
             batch = unembedded[i : i + batch_size]
@@ -43,23 +65,30 @@ async def embed_pending_memories(
                     len(batch),
                 )
                 raise
-            for mem, embedding in zip(batch, embeddings):
+            _validate_batch(batch, embeddings, expected_dim)
+            for mem, embedding in zip(batch, embeddings, strict=True):
                 mem.embedding = embedding
                 total += 1
 
     elif hasattr(provider, "_pool"):
-        # PostgresMemoryProvider: use asyncpg pool directly
-        pool = provider._pool
+        pool = provider._pool  # type: ignore[attr-defined]
+        params: list = [batch_size]
+        user_filter = ""
+        if user_id is not None:
+            user_filter = "AND user_id = $2"
+            params.append(user_id)
+
         while True:
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
-                    """
+                    f"""
                     SELECT memory_id, content
                     FROM memory.memories
                     WHERE embedding IS NULL
+                    {user_filter}
                     LIMIT $1
                     """,
-                    batch_size,
+                    *params,
                 )
             if not rows:
                 break
@@ -74,16 +103,21 @@ async def embed_pending_memories(
                 )
                 raise
 
+            _validate_batch(rows, embeddings, expected_dim)
+
+            update_args = [
+                (embedding, row["memory_id"])
+                for row, embedding in zip(rows, embeddings, strict=True)
+            ]
             async with pool.acquire() as conn:
-                for row, embedding in zip(rows, embeddings):
-                    await conn.execute(
+                async with conn.transaction():
+                    await conn.executemany(
                         """
                         UPDATE memory.memories
                         SET embedding = $1::halfvec
                         WHERE memory_id = $2
                         """,
-                        embedding,
-                        row["memory_id"],
+                        update_args,
                     )
             total += len(rows)
             if len(rows) < batch_size:
