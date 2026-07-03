@@ -7,7 +7,7 @@ import pytest
 from mnemosyne.db.models.memory import Memory, MemoryType
 from tests.fixtures.fake_embedding import FakeEmbeddingClient
 from tests.fixtures.fake_llm import FakeLLMClient
-from mnemosyne.providers.in_memory import InMemoryProvider
+from tests.unit.pipeline.conftest import build_in_memory_provider
 from mnemosyne.pipeline.contradiction import (
     ContradictionAction,
     CONTRADICTION_SIMILARITY_MIN,
@@ -25,7 +25,7 @@ from mnemosyne.pipeline.contradiction import (
 
 
 async def _make_memory(
-    provider: InMemoryProvider,
+    provider,
     embedder: FakeEmbeddingClient,
     user_id: uuid.UUID,
     content: str,
@@ -108,7 +108,7 @@ class TestExecuteAction:
     async def test_supersede_action(self):
         """SUPERSEDE invalidates old, keeps new."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         old_mem = await _make_memory(provider, embedder, user_id, "Budget is $200", importance=0.6)
@@ -126,7 +126,7 @@ class TestExecuteAction:
     async def test_keep_both_action(self):
         """KEEP_BOTH leaves both memories active."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         old_mem = await _make_memory(provider, embedder, user_id, "Prefers blue", importance=0.5)
@@ -143,7 +143,7 @@ class TestExecuteAction:
     async def test_merge_action(self):
         """MERGE creates a merged memory and invalidates both originals."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         old_mem = await _make_memory(provider, embedder, user_id, "Budget is $200", importance=0.6)
@@ -177,7 +177,7 @@ class TestExecuteAction:
     async def test_keep_old_action(self):
         """KEEP_OLD invalidates new, keeps old."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         old_mem = await _make_memory(provider, embedder, user_id, "Shoe size 10", importance=0.7)
@@ -201,7 +201,7 @@ class TestExecuteAction:
 class TestResolveContradiction:
     async def test_supersede_via_llm(self):
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
         llm = FakeActionLLM("SUPERSEDE")
 
@@ -217,7 +217,7 @@ class TestResolveContradiction:
     async def test_llm_failure_defaults_to_keep_both(self):
         """When LLM raises, resolve_contradiction falls back to KEEP_BOTH."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
         llm = FailingLLM()
 
@@ -234,7 +234,7 @@ class TestResolveContradiction:
     async def test_merge_embeds_content(self):
         """MERGE action must call embedder.embed with the merged text."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         llm = FakeActionLLM("MERGE")
 
         embed_calls: list[str] = []
@@ -268,7 +268,7 @@ class TestDetectContradictions:
     async def test_detect_no_contradictions_unrelated(self):
         """Two completely unrelated memories should return an empty candidate list."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         # These texts hash to very different vectors — similarity will be far
@@ -284,7 +284,7 @@ class TestDetectContradictions:
     async def test_no_embedding_returns_empty(self):
         """Memory without an embedding produces no candidates."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         mem = Memory(
@@ -298,7 +298,7 @@ class TestDetectContradictions:
     async def test_self_not_returned(self):
         """The new memory itself is never returned as its own candidate."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         mem = await _make_memory(provider, embedder, user_id, "Budget is $200")
@@ -310,7 +310,7 @@ class TestDetectContradictions:
     async def test_similarity_band_filter(self):
         """Only memories in the [0.70, 0.89] band are returned as candidates."""
         user_id = uuid.uuid4()
-        provider = InMemoryProvider()
+        provider = build_in_memory_provider()
         embedder = FakeEmbeddingClient(dim=768)
 
         # Create the target memory.

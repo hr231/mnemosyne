@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import uuid
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_ARCHIVE_THRESHOLD: float = 0.05
 DEFAULT_ARCHIVE_AFTER_DAYS: int = 90
 DEFAULT_HALF_LIFE_DAYS: float = 60.0
+
+# Minimum elapsed time before a memory is decayed again. Decay is applied in
+# discrete intervals so re-running within the same interval is a no-op.
+DECAY_MIN_INTERVAL_DAYS: float = 1.0
 
 
 class DecayConfig(BaseModel):
@@ -46,21 +51,33 @@ class DecayConfig(BaseModel):
         return cls(**kwargs)
 
 
+def _decay_anchor(memory: Memory) -> datetime:
+    """Return the timestamp decay should be measured from.
+
+    Anchored at ``last_decayed_at`` when the memory has been decayed before,
+    otherwise ``last_accessed``. This makes repeated decay passes idempotent:
+    once a memory is decayed and stamped, a re-run measures zero elapsed time
+    and leaves the importance unchanged.
+    """
+    anchor = memory.last_decayed_at or memory.last_accessed
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    return anchor
+
+
 def compute_decayed_importance(memory: Memory, now: datetime | None = None) -> float:
     """Return the exponentially decayed importance for *memory*.
 
-    Formula: ``importance * exp(-decay_rate * days_since_last_access)``
+    Formula: ``importance * exp(-decay_rate * days_since_anchor)`` where the
+    anchor is ``COALESCE(last_decayed_at, last_accessed)``.
 
     The result is clamped to [0.0, 1.0].
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
-    last = memory.last_accessed
-    # Ensure both datetimes are timezone-aware for comparison
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    days_since = max(0.0, (now - last).total_seconds() / 86400.0)
+    anchor = _decay_anchor(memory)
+    days_since = max(0.0, (now - anchor).total_seconds() / 86400.0)
     decayed = memory.importance * math.exp(-memory.decay_rate * days_since)
     return max(0.0, min(1.0, decayed))
 
@@ -98,6 +115,7 @@ async def apply_decay(
     archive_threshold: float = DEFAULT_ARCHIVE_THRESHOLD,
     archive_after_days: int = DEFAULT_ARCHIVE_AFTER_DAYS,
     dry_run: bool = False,
+    metrics: object | None = None,
 ) -> dict:
     """Apply exponential importance decay to active memories and archive stale ones.
 
@@ -141,6 +159,7 @@ async def apply_decay(
             dry_run,
             now,
             stats,
+            metrics,
         )
     elif hasattr(provider, "_pool"):
         await _apply_decay_postgres(
@@ -151,6 +170,7 @@ async def apply_decay(
             dry_run,
             now,
             stats,
+            metrics,
         )
     else:
         logger.warning(
@@ -184,6 +204,7 @@ async def _apply_decay_in_memory(
     dry_run: bool,
     now: datetime,
     stats: dict,
+    metrics: object | None,
 ) -> None:
     """Decay + archive logic for InMemoryProvider."""
     memories: list[Memory] = [
@@ -194,23 +215,27 @@ async def _apply_decay_in_memory(
     ]
 
     for mem in memories:
+        anchor = _decay_anchor(mem)
+        if (now - anchor).total_seconds() / 86400.0 < DECAY_MIN_INTERVAL_DAYS:
+            continue
+
         new_importance = compute_decayed_importance(mem, now)
         if new_importance == mem.importance:
             continue
 
         if not dry_run:
-            await provider.update(mem.memory_id, importance=new_importance)
+            await provider.update(
+                mem.memory_id, importance=new_importance, last_decayed_at=now
+            )
         stats["decayed"] += 1
 
-        if should_archive(mem, archive_threshold, archive_after_days, now) or (
-            new_importance < archive_threshold
-            and _days_since(mem.last_accessed, now) > archive_after_days
-        ):
+        if new_importance < archive_threshold and _days_since(mem.last_accessed, now) > archive_after_days:
             if not dry_run:
                 current = provider._memories.get(mem.memory_id)  # type: ignore[attr-defined]
                 if current:
                     current.metadata["archived"] = True
             stats["archived"] += 1
+            _record_archive(metrics)
 
 
 async def _apply_decay_postgres(
@@ -221,6 +246,7 @@ async def _apply_decay_postgres(
     dry_run: bool,
     now: datetime,
     stats: dict,
+    metrics: object | None,
 ) -> None:
     """Decay + archive logic for PostgresMemoryProvider."""
     pool = provider._pool  # type: ignore[attr-defined]
@@ -234,7 +260,8 @@ async def _apply_decay_postgres(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT memory_id, importance, last_accessed, decay_rate, metadata
+            SELECT memory_id, importance, last_accessed, last_decayed_at,
+                   decay_rate, metadata
             FROM memory.memories
             WHERE valid_until IS NULL
             {user_filter}
@@ -244,34 +271,73 @@ async def _apply_decay_postgres(
 
     cutoff = now - timedelta(days=archive_after_days)
 
-    updates: list[tuple[float, dict, uuid.UUID]] = []
+    updates: list[tuple[float, str, uuid.UUID]] = []
     for row in rows:
-        last = row["last_accessed"]
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        days_since = max(0.0, (now - last).total_seconds() / 86400.0)
-        new_importance = max(0.0, min(1.0, row["importance"] * math.exp(-row["decay_rate"] * days_since)))
+        anchor = row["last_decayed_at"] or row["last_accessed"]
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+        last_accessed = row["last_accessed"]
+        if last_accessed.tzinfo is None:
+            last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+
+        days_since = max(0.0, (now - anchor).total_seconds() / 86400.0)
+        if days_since < DECAY_MIN_INTERVAL_DAYS:
+            continue
+        new_importance = max(
+            0.0, min(1.0, row["importance"] * math.exp(-row["decay_rate"] * days_since))
+        )
         if new_importance == row["importance"]:
             continue
 
-        meta = dict(row["metadata"] or {})
-        do_archive = new_importance < archive_threshold and last < cutoff
+        meta = _decode_jsonb(row["metadata"])
+        do_archive = new_importance < archive_threshold and last_accessed < cutoff
         if do_archive:
             meta["archived"] = True
             stats["archived"] += 1
+            _record_archive(metrics)
         stats["decayed"] += 1
-        updates.append((new_importance, meta, row["memory_id"]))
+        updates.append((new_importance, json.dumps(meta), row["memory_id"]))
 
     if not dry_run and updates:
         async with pool.acquire() as conn:
             await conn.executemany(
                 """
                 UPDATE memory.memories
-                SET importance = $1, metadata = $2::jsonb, updated_at = now()
+                SET importance = $1,
+                    metadata = $2::jsonb,
+                    last_decayed_at = now(),
+                    updated_at = now()
                 WHERE memory_id = $3
                 """,
                 updates,
             )
+
+
+def _decode_jsonb(value: object) -> dict:
+    """Return a mutable dict from an asyncpg jsonb column.
+
+    asyncpg returns jsonb as a JSON string unless a codec is registered, so
+    decode strings explicitly and copy dicts to avoid mutating shared state.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _record_archive(metrics: object | None) -> None:
+    if metrics is not None and hasattr(metrics, "record_decay_archive"):
+        try:
+            metrics.record_decay_archive()
+        except Exception:  # noqa: BLE001
+            logger.debug("metrics.record_decay_archive failed", exc_info=True)
 
 
 def _days_since(last_accessed: datetime, now: datetime) -> float:
@@ -286,6 +352,7 @@ async def apply_decay_with_config(
     config: DecayConfig,
     user_id: uuid.UUID | None = None,
     dry_run: bool = False,
+    metrics: object | None = None,
 ) -> dict:
     """Run decay using a DecayConfig object. Thin wrapper over apply_decay."""
     return await apply_decay(
@@ -294,4 +361,5 @@ async def apply_decay_with_config(
         archive_threshold=config.archival_threshold,
         archive_after_days=config.archival_age_days_min,
         dry_run=dry_run,
+        metrics=metrics,
     )
