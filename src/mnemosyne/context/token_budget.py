@@ -1,15 +1,37 @@
 from __future__ import annotations
 
+import functools
+
 import tiktoken
 
-_ENC = tiktoken.encoding_for_model("gpt-4")
+# Default tokenizer. cl100k_base backs gpt-4/gpt-3.5 and is a reasonable
+# host-agnostic estimator; override per deployment via ``encoding_name``.
+DEFAULT_ENCODING = "cl100k_base"
+
+
+@functools.lru_cache(maxsize=8)
+def get_encoding(name: str = DEFAULT_ENCODING) -> tiktoken.Encoding:
+    """Return a cached tiktoken encoding by name.
+
+    Falls back to :data:`DEFAULT_ENCODING` when *name* is unknown so a
+    misconfigured host tokenizer degrades to estimation rather than raising.
+    """
+    try:
+        return tiktoken.get_encoding(name)
+    except (KeyError, ValueError):
+        return tiktoken.get_encoding(DEFAULT_ENCODING)
 
 
 class TokenBudget:
     """Tracks remaining token budget and handles truncation."""
 
-    def __init__(self, max_tokens: int, encoding: tiktoken.Encoding | None = None):
-        self._encoding = encoding or _ENC
+    def __init__(
+        self,
+        max_tokens: int,
+        encoding: tiktoken.Encoding | None = None,
+        encoding_name: str = DEFAULT_ENCODING,
+    ):
+        self._encoding = encoding or get_encoding(encoding_name)
         self._max_tokens = max_tokens
         self._used = 0
 

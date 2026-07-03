@@ -13,13 +13,17 @@ the same vector + RRF path as any other memory.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from mnemosyne.db.models.memory import ScoredMemory
 from mnemosyne.embedding.base import EmbeddingClient
 from mnemosyne.providers.base import MemoryProvider
+from mnemosyne.retrieval.fusion import RRF_K, fuse_rrf
+from mnemosyne.retrieval.fusion import rrf_score as _rrf_score
 from mnemosyne.retrieval.scoring import ScoringWeights
 
 if TYPE_CHECKING:
@@ -27,16 +31,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# RRF constant (standard value from the literature)
-RRF_K = 60
-
 # Max mentions to expand per entity
 MAX_MENTIONS_PER_ENTITY = 50
-
-
-def _rrf_score(ranks: list[int], k: int = RRF_K) -> float:
-    """Compute Reciprocal Rank Fusion score from a list of ranks (1-indexed)."""
-    return sum(1.0 / (k + rank) for rank in ranks)
 
 
 async def entity_aware_search(
@@ -49,6 +45,8 @@ async def entity_aware_search(
     limit: int = 10,
     weights: ScoringWeights | None = None,
     entity_filter: list[str] | None = None,
+    *,
+    out_entity_names: list[str] | None = None,
 ) -> list[ScoredMemory]:
     """Search memories using both vector similarity and entity expansion.
 
@@ -59,6 +57,10 @@ async def entity_aware_search(
     whose normalised name matches one of the supplied values — the query-side
     NER pass is skipped and only the explicit filter is used.
 
+    When ``out_entity_names`` is supplied it is populated (in place) with the
+    deduped entity names discovered from the query, so callers such as context
+    assembly can render an entity summary without re-running NER.
+
     Steps:
     1. Run standard vector search
     2. Extract entities from query (spaCy + GLiNER, no LLM for latency) or
@@ -68,42 +70,87 @@ async def entity_aware_search(
     5. Fetch those memories
     6. Fuse via Reciprocal Rank Fusion
     """
-    # Step 1: Vector search (always runs)
+    # Step 1: Vector search (always runs). Over-fetch without the access bump
+    # so candidates that never reach the returned slice are not touched; the
+    # final slice is bumped once below.
     vector_results = await provider.search(
-        query_embedding, user_id=user_id, limit=limit * 3, weights=weights
+        query_embedding,
+        user_id=user_id,
+        limit=limit * 3,
+        weights=weights,
+        bump_access=False,
     )
 
     # If no entity store, return vector-only results
     if entity_store is None:
-        return vector_results[:limit]
+        result = vector_results[:limit]
+        await _bump_returned(provider, result)
+        return result
 
     # Step 2: Extract entities from query (or honour explicit filter)
     entity_results = await _get_entity_memories(
         query_text,
+        query_embedding,
         user_id,
         entity_store,
         provider,
         embedder,
         entity_filter=entity_filter,
+        out_entity_names=out_entity_names,
     )
 
     if not entity_results:
-        return vector_results[:limit]
+        result = vector_results[:limit]
+        await _bump_returned(provider, result)
+        return result
 
     # Step 3: RRF fusion
     fused = _fuse_rrf(vector_results, entity_results, limit)
+    await _bump_returned(provider, fused)
     return fused
+
+
+async def _bump_returned(
+    provider: MemoryProvider, results: list[ScoredMemory]
+) -> None:
+    """Record a single access bump on exactly the returned memories.
+
+    Routes through the batched ``bump_access`` so context injection issues one
+    UPDATE for the whole slice and never writes a ``memory_history`` row.
+    """
+    ids = [sm.memory.memory_id for sm in results]
+    if not ids:
+        return
+    try:
+        await provider.bump_access(ids)
+    except Exception:
+        # Bookkeeping must never fail retrieval; the ranking is still valid.
+        logger.debug("access bump skipped for %d memories", len(ids))
+        return
+    now = datetime.now(timezone.utc)
+    for sm in results:
+        sm.memory.access_count += 1
+        sm.memory.last_accessed = max(now, sm.memory.last_accessed)
 
 
 async def _get_entity_memories(
     query_text: str,
+    query_embedding: list[float],
     user_id: uuid.UUID,
     entity_store: "EntityStore",
     provider: MemoryProvider,
     embedder: EmbeddingClient | None = None,
     entity_filter: list[str] | None = None,
+    out_entity_names: list[str] | None = None,
 ) -> list[ScoredMemory]:
-    """Extract entities from query (or honour filter) and expand to related memories."""
+    """Extract entities from query (or honour filter) and expand to related memories.
+
+    The query embedding is supplied by the caller and reused for the
+    embedding-similarity entity fallback — the query is never re-embedded.
+
+    When ``out_entity_names`` is supplied it is filled with the deduped names
+    of the entities discovered from the query, in discovery order.
+    """
     raw_entities: list[_SimpleEntity] = []
 
     # Explicit filter: skip NER, honour the caller's restriction verbatim.
@@ -137,16 +184,21 @@ async def _get_entity_memories(
                 except Exception:
                     continue
     else:
-        # Try NER extraction (graceful degradation if not installed)
+        # NER extraction is CPU-bound and synchronous — run it off the event
+        # loop. Graceful degradation when the extractors are not installed.
         try:
             from mnemosyne.pipeline.ner.spacy_extractor import extract_entities_spacy
-            raw_entities.extend(extract_entities_spacy(query_text))
+            raw_entities.extend(
+                await asyncio.to_thread(extract_entities_spacy, query_text)
+            )
         except Exception:
             pass
 
         try:
             from mnemosyne.pipeline.ner.gliner_extractor import extract_entities_gliner
-            raw_entities.extend(extract_entities_gliner(query_text))
+            raw_entities.extend(
+                await asyncio.to_thread(extract_entities_gliner, query_text)
+            )
         except Exception:
             pass
 
@@ -165,12 +217,12 @@ async def _get_entity_memories(
                         )
                         break
 
-        if not raw_entities and embedder is not None:
+        if not raw_entities:
             # Last resort: embedding similarity against registered entities.
+            # Reuse the query embedding supplied by the caller — no re-embed.
             try:
-                query_emb = await embedder.embed(query_text)
                 similar_entities = await entity_store.find_by_embedding(
-                    user_id, query_emb, threshold=0.80, limit=5
+                    user_id, query_embedding, threshold=0.80, limit=5
                 )
                 for ent in similar_entities:
                     raw_entities.append(
@@ -180,6 +232,14 @@ async def _get_entity_memories(
                     )
             except Exception:
                 pass
+
+    if out_entity_names is not None:
+        seen_names: set[str] = set()
+        for raw in raw_entities:
+            key = raw.name.strip().lower()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                out_entity_names.append(raw.name)
 
     if not raw_entities:
         return []
@@ -204,19 +264,19 @@ async def _get_entity_memories(
     if not all_memory_ids:
         return []
 
-    # Fetch memories and wrap as ScoredMemory
-    entity_scored: list[ScoredMemory] = []
-    for mid in all_memory_ids:
-        mem = await provider.get_by_id(mid)
-        if mem is None or mem.valid_until is not None:
-            continue
-        entity_scored.append(ScoredMemory(
-            memory=mem,
+    # Batch-fetch active memories in one round-trip; get_by_ids already filters
+    # invalidated rows in SQL. Preserve mention order for stable RRF ranks.
+    fetched = await provider.get_by_ids(all_memory_ids)
+    by_id = {mem.memory_id: mem for mem in fetched}
+    return [
+        ScoredMemory(
+            memory=by_id[mid],
             score=0.0,  # score replaced by RRF fusion
             score_breakdown={"entity_expanded": 1.0},
-        ))
-
-    return entity_scored
+        )
+        for mid in all_memory_ids
+        if mid in by_id
+    ]
 
 
 def _fuse_rrf(
@@ -224,49 +284,18 @@ def _fuse_rrf(
     entity_results: list[ScoredMemory],
     limit: int,
 ) -> list[ScoredMemory]:
-    """Fuse two ranked lists using Reciprocal Rank Fusion."""
-    # Build rank maps (1-indexed)
-    vector_ranks: dict[uuid.UUID, int] = {}
-    for i, sm in enumerate(vector_results):
-        vector_ranks[sm.memory.memory_id] = i + 1
+    """Fuse the vector and entity-expanded lists with Reciprocal Rank Fusion.
 
-    entity_ranks: dict[uuid.UUID, int] = {}
-    for i, sm in enumerate(entity_results):
-        entity_ranks[sm.memory.memory_id] = i + 1
-
-    # Collect all unique memory_ids, preserving first-seen ScoredMemory object
-    all_memories: dict[uuid.UUID, ScoredMemory] = {}
-    for sm in vector_results:
-        all_memories[sm.memory.memory_id] = sm
-    for sm in entity_results:
-        if sm.memory.memory_id not in all_memories:
-            all_memories[sm.memory.memory_id] = sm
-
-    # Compute RRF scores and build output list
-    rrf_scores: list[tuple[float, ScoredMemory]] = []
-    for mid, sm in all_memories.items():
-        ranks = []
-        if mid in vector_ranks:
-            ranks.append(vector_ranks[mid])
-        if mid in entity_ranks:
-            ranks.append(entity_ranks[mid])
-
-        rrf = _rrf_score(ranks)
-        fused_sm = ScoredMemory(
-            memory=sm.memory,
-            score=rrf,
-            score_breakdown={
-                **sm.score_breakdown,
-                "rrf_score": rrf,
-                "in_vector": 1.0 if mid in vector_ranks else 0.0,
-                "in_entity": 1.0 if mid in entity_ranks else 0.0,
-            },
-        )
-        rrf_scores.append((rrf, fused_sm))
-
-    # Sort by RRF score descending
-    rrf_scores.sort(key=lambda x: -x[0])
-    return [sm for _, sm in rrf_scores[:limit]]
+    Delegates the core fusion to :func:`mnemosyne.retrieval.fusion.fuse_rrf`
+    and relabels the generic ``in_left``/``in_right`` provenance flags to the
+    domain-specific ``in_vector``/``in_entity`` keys callers expect.
+    """
+    fused = fuse_rrf(vector_results, entity_results, limit)
+    for sm in fused:
+        bd = sm.score_breakdown
+        bd["in_vector"] = bd.pop("in_left", 0.0)
+        bd["in_entity"] = bd.pop("in_right", 0.0)
+    return fused
 
 
 class _SimpleEntity:

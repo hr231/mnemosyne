@@ -65,7 +65,10 @@ async def provider(request):
 
     from mnemosyne.providers.postgres import PostgresMemoryProvider
 
-    pg_provider = await PostgresMemoryProvider.connect(dsn)
+    try:
+        pg_provider = await PostgresMemoryProvider.connect(dsn)
+    except OSError:
+        pytest.skip("PostgreSQL unreachable — skipping postgres variant")
 
     # Verify the schema exists; if not, skip rather than fail.
     async with pg_provider._pool.acquire() as conn:
@@ -128,12 +131,15 @@ async def entity_store(request):
     from pgvector.asyncpg import register_vector
     from mnemosyne.db.repositories.entity import PostgresEntityStore
 
-    pool = await asyncpg.create_pool(
-        dsn,
-        min_size=1,
-        max_size=5,
-        init=lambda conn: register_vector(conn),
-    )
+    try:
+        pool = await asyncpg.create_pool(
+            dsn,
+            min_size=1,
+            max_size=5,
+            init=lambda conn: register_vector(conn),
+        )
+    except OSError:
+        pytest.skip("PostgreSQL unreachable — skipping postgres variant")
 
     async with pool.acquire() as conn:
         try:

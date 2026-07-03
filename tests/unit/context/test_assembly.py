@@ -99,6 +99,58 @@ async def test_profile_section_has_high_importance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_memory_duplicated_across_sections() -> None:
+    """A high-importance, query-relevant, recent memory must appear at most
+    once across all sections — its content line is not repeated."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=768)
+    user_id = uuid.uuid4()
+
+    # Single high-importance memory: would otherwise qualify for profile,
+    # relevant, AND recent sections simultaneously.
+    content = "User is the founder and lead architect of the platform"
+    await _add_memory(provider, embedder, user_id, content, importance=0.95)
+
+    query_vec = await embedder.embed(content)
+    block = await assemble_context(
+        provider=provider,
+        user_id=user_id,
+        query_embedding=query_vec,
+        embedder=embedder,
+        token_budget=1000,
+    )
+
+    assert block.text.count(content) == 1
+
+
+@pytest.mark.asyncio
+async def test_dedup_keeps_higher_priority_section() -> None:
+    """When a memory could sit in multiple sections, it stays in the highest
+    priority one (profile) and is excluded from lower sections."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient(dim=768)
+    user_id = uuid.uuid4()
+
+    profile_content = "User leads the security team"
+    await _add_memory(provider, embedder, user_id, profile_content, importance=0.9)
+
+    query_vec = await embedder.embed(profile_content)
+    block = await assemble_context(
+        provider=provider,
+        user_id=user_id,
+        query_embedding=query_vec,
+        embedder=embedder,
+        token_budget=1000,
+    )
+
+    profile = [s for s in block.sections if s.name == "profile"]
+    others = [s for s in block.sections if s.name in ("relevant", "recent")]
+    assert profile and profile_content in profile[0].content
+    for s in others:
+        assert profile_content not in s.content
+
+
+@pytest.mark.asyncio
 async def test_small_budget_truncates() -> None:
     provider = InMemoryProvider()
     embedder = FakeEmbeddingClient(dim=768)
