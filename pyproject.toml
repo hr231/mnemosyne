@@ -6,6 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "mnemosyne"
 version = "0.3.0"
 description = "General-purpose agent memory module with hybrid extraction and multi-signal retrieval"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Harshit" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",
@@ -34,10 +44,14 @@ fastembed = ["fastembed>=0.3"]
 ner = ["spacy>=3.7", "gliner>=0.2"]
 nli = ["transformers>=4.40", "sentencepiece"]
 monitoring = ["prometheus_client>=0.19"]
-all = ["mnemosyne[openai,anthropic,google,fastembed,ner,nli,monitoring]"]
+migrations = ["psycopg2-binary>=2.9"]
+all = ["mnemosyne[openai,anthropic,google,fastembed,ner,nli,monitoring,migrations]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mnemosyne = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
