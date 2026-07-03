@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class ProcessingLog(BaseModel):
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     session_id: uuid.UUID
+    user_id: uuid.UUID | None = None
     pipeline_step: str
     status: str = "pending"
     error_message: str | None = None

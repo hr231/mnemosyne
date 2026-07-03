@@ -31,6 +31,7 @@ class Memory(BaseModel):
     importance: float = 0.5
     access_count: int = 0
     last_accessed: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_decayed_at: datetime | None = None
     decay_rate: float = 0.01
 
     valid_from: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
