@@ -157,6 +157,47 @@ class TestSettingsFromEnv:
         assert s.llm_api_key == "sk-llm-key"
 
 
+class TestHardeningSettingsDefaults:
+    def test_new_field_defaults(self):
+        s = Settings()
+        assert s.llm_timeout_s == 60.0
+        assert s.llm_max_retries == 3
+        assert s.embedding_timeout_s == 30.0
+        assert s.embedding_max_retries == 3
+        assert s.worker_poll_interval_s == 10.0
+        assert s.maintenance_interval_s == 86400
+        assert s.processing_visibility_timeout_s == 600
+        assert s.memory_fail_open is True
+        assert s.save_memory_content_cap == 10_000
+
+    def test_new_fields_from_env(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_LLM_TIMEOUT_S", "12.5")
+        monkeypatch.setenv("MNEMOSYNE_LLM_MAX_RETRIES", "5")
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_TIMEOUT_S", "7.0")
+        monkeypatch.setenv("MNEMOSYNE_EMBEDDING_MAX_RETRIES", "1")
+        monkeypatch.setenv("MNEMOSYNE_WORKER_POLL_INTERVAL_S", "2.5")
+        monkeypatch.setenv("MNEMOSYNE_MAINTENANCE_INTERVAL_S", "3600")
+        monkeypatch.setenv("MNEMOSYNE_PROCESSING_VISIBILITY_TIMEOUT_S", "120")
+        s = Settings.from_env()
+        assert s.llm_timeout_s == pytest.approx(12.5)
+        assert s.llm_max_retries == 5
+        assert s.embedding_timeout_s == pytest.approx(7.0)
+        assert s.embedding_max_retries == 1
+        assert s.worker_poll_interval_s == pytest.approx(2.5)
+        assert s.maintenance_interval_s == pytest.approx(3600)
+        assert s.processing_visibility_timeout_s == pytest.approx(120)
+
+    def test_memory_fail_open_from_env_false(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_MEMORY_FAIL_OPEN", "0")
+        s = Settings.from_env()
+        assert s.memory_fail_open is False
+
+    def test_memory_fail_open_from_env_true(self, monkeypatch):
+        monkeypatch.setenv("MNEMOSYNE_MEMORY_FAIL_OPEN", "1")
+        s = Settings.from_env()
+        assert s.memory_fail_open is True
+
+
 class TestConfigProperties:
     def test_llm_config_defaults(self):
         s = Settings()

@@ -27,12 +27,14 @@ class ListMemoriesResponse(BaseModel):
 
 class GetMemoryRequest(BaseModel):
     memory_id: uuid.UUID
+    user_id: uuid.UUID
 
 
 class DeleteMemoryRequest(BaseModel):
     """Soft-invalidate a single memory (does not physically delete)."""
 
     memory_id: uuid.UUID
+    user_id: uuid.UUID
     requestor: str = Field(..., min_length=1)
 
 
@@ -48,6 +50,7 @@ class DeleteUserResponse(BaseModel):
     user_id: uuid.UUID
     rows_deleted: int
     dry_run: bool
+    breakdown: dict[str, int] = Field(default_factory=dict)
 
 
 class ExportUserResponse(BaseModel):
@@ -55,6 +58,7 @@ class ExportUserResponse(BaseModel):
 
     user_id: uuid.UUID
     exported_at: datetime
+    requestor: str
     memory_count: int
     entity_count: int
     memories: list[dict[str, Any]]

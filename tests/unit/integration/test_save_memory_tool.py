@@ -162,3 +162,129 @@ async def test_handle_invalid_session_id():
     )
     assert result["status"] == "error"
     assert "source_session_id" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_non_numeric_importance_returns_error_dict():
+    """A non-numeric importance must return an error dict, not raise."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": "x", "importance": "high"},
+    )
+    assert result["status"] == "error"
+    assert "importance" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_none_importance_uses_default():
+    """importance=None should fall back to the default, not crash."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": "ok", "importance": None},
+    )
+    assert result["status"] == "saved"
+
+
+@pytest.mark.asyncio
+async def test_handle_content_over_cap_returns_error():
+    """Content longer than the cap is rejected with an error dict."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": "z" * 10_001},
+    )
+    assert result["status"] == "error"
+    assert "content" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_content_at_cap_is_accepted():
+    """Content exactly at the cap is accepted."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": "z" * 10_000},
+    )
+    assert result["status"] == "saved"
+
+
+@pytest.mark.asyncio
+async def test_handle_custom_content_cap():
+    """A caller-supplied content_cap overrides the default."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": "abcdef"},
+        content_cap=5,
+    )
+    assert result["status"] == "error"
+    assert "content" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_non_string_content_returns_error():
+    """Non-string content must not raise inside the handler."""
+    provider = InMemoryProvider()
+    embedder = FakeEmbeddingClient()
+    result = await handle_save_memory(
+        provider,
+        embedder,
+        USER_ID,
+        {"content": 123},
+    )
+    assert result["status"] == "error"
+    assert "content" in result["error"]
+
+
+class _BoomEmbedder(EmbeddingClient):
+    async def embed(self, text: str) -> list[float]:
+        raise RuntimeError("embedder down")
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embedder down")
+
+
+@pytest.mark.asyncio
+async def test_handle_persist_failure_returns_error_dict_fail_open():
+    """A downstream failure (embed/add) under fail_open returns an error dict,
+    never raises into the host.
+    """
+    provider = InMemoryProvider()
+    result = await handle_save_memory(
+        provider,
+        _BoomEmbedder(),
+        USER_ID,
+        {"content": "valid content"},
+    )
+    assert result["status"] == "error"
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_handle_persist_failure_raises_when_fail_closed():
+    provider = InMemoryProvider()
+    with pytest.raises(RuntimeError):
+        await handle_save_memory(
+            provider,
+            _BoomEmbedder(),
+            USER_ID,
+            {"content": "valid content"},
+            fail_open=False,
+        )
