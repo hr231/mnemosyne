@@ -264,3 +264,21 @@ class TestMultiSignalScorer:
     def test_default_scorer_uses_default_weights(self) -> None:
         scorer = MultiSignalScorer()
         assert scorer.weights == ScoringWeights()
+
+    # -- cosine dimension mismatch ------------------------------------------
+
+    def test_cosine_dimension_mismatch_raises(self) -> None:
+        """A query/memory embedding length mismatch is a hard error, not a
+        silently truncated similarity."""
+        scorer = MultiSignalScorer()
+        memory = _make_memory(embedding=[0.1] * 16)
+        query = [0.1] * 32
+        with pytest.raises(ValueError):
+            scorer.score(memory, query, self._now())
+
+    def test_cosine_matching_dimensions_ok(self) -> None:
+        scorer = MultiSignalScorer()
+        memory = _make_memory(embedding=[0.2] * 32)
+        query = [0.2] * 32
+        total, _ = scorer.score(memory, query, self._now())
+        assert math.isfinite(total)
