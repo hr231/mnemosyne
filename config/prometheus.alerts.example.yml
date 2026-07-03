@@ -1,0 +1,76 @@
+# Example Prometheus alerting rules for Mnemosyne.
+#
+# Reference this file from prometheus.yml via `rule_files:` (see
+# prometheus.example.yml). Thresholds mirror the monitoring targets in the
+# design doc; tune `for:` windows and comparison values to your traffic.
+groups:
+  - name: mnemosyne
+    rules:
+      - alert: MnemosyneExporterDown
+        expr: up{job="mnemosyne"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mnemosyne exporter is down"
+          description: "Prometheus cannot scrape the Mnemosyne exporter at {{ $labels.instance }} for 2m."
+
+      - alert: MnemosyneWorkerStalled
+        expr: time() - mnemosyne_last_poll_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mnemosyne worker has not polled recently"
+          description: "No worker poll on {{ $labels.instance }} for over 5m; the pipeline may be stalled."
+
+      - alert: MnemosyneQueueDepthGrowing
+        expr: mnemosyne_queue_depth > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne processing backlog is growing"
+          description: "queue_depth on {{ $labels.instance }} has stayed above 100 pending rows for 15m."
+
+      - alert: MnemosynePipelineLagHigh
+        expr: mnemosyne_pipeline_lag_seconds > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne pipeline lag is high"
+          description: "Oldest pending processing_log row on {{ $labels.instance }} is older than 15m."
+
+      - alert: MnemosyneProcessingFailures
+        expr: increase(mnemosyne_processing_failed_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne processing failures detected"
+          description: "{{ $value }} processing_log rows permanently failed on {{ $labels.instance }} in the last 15m."
+
+      - alert: MnemosyneSessionDeadLetter
+        expr: increase(mnemosyne_session_dlq_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne session events dead-lettered"
+          description: "{{ $value }} session-close events exceeded max_retries on {{ $labels.instance }} in the last 15m."
+
+      - alert: MnemosyneHookFailures
+        expr: increase(mnemosyne_hook_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne session-close hooks are failing"
+          description: "{{ $value }} session-close hooks failed before enqueue on {{ $labels.instance }} in the last 15m."
+
+      - alert: MnemosyneRetrievalLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(mnemosyne_retrieval_latency_ms_bucket[5m])) by (le)) > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mnemosyne retrieval p95 latency is high"
+          description: "Retrieval p95 latency on {{ $labels.instance }} exceeded 500ms for 10m."
