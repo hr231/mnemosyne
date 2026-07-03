@@ -1,9 +1,18 @@
-# Example Prometheus scrape config. Copy into your prometheus.yml scrape_configs.
+# Example Prometheus configuration for scraping Mnemosyne.
+#
+# The exporter binds 127.0.0.1:9464 by default (override with
+# MNEMOSYNE_METRICS_ADDR / MNEMOSYNE_METRICS_PORT). Point Prometheus at
+# whatever address is reachable from your Prometheus host.
+
+# Load the shipped alert rules alongside your own rule_files entries.
+rule_files:
+  - prometheus.alerts.example.yml
+
 scrape_configs:
   - job_name: mnemosyne
     scrape_interval: 15s
     static_configs:
-      - targets: ["localhost:9090"]
+      - targets: ["localhost:9464"]
         labels:
           service: mnemosyne
           env: dev
